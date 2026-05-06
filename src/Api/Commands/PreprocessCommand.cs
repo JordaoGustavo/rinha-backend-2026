@@ -52,16 +52,36 @@ public static class PreprocessCommand
         string? dir = Path.GetDirectoryName(outputPath);
         if (dir != null) Directory.CreateDirectory(dir);
 
-        Console.WriteLine($"Building index: format={format}, clusters={numClusters}, iterations={kmeansIter}...");
-        var ivf = IvfBuilder.Build(vectors.ToArray(), labels.ToArray(), numClusters, kmeansIter);
-        Console.WriteLine($"Writing {outputPath}...");
+        if (format == "exact")
+        {
+            const int pd = ExactBinaryFormat.PaddedDims;
+            var padded = new float[(long)n * pd];
+            var labelArr = labels.ToArray();
+            for (int i = 0; i < n; i++)
+            {
+                var src = vectors[i];
+                int off = i * pd;
+                for (int d = 0; d < 14; d++)
+                    padded[off + d] = src[d];
+            }
 
-        if (format == "kmknn")
-            KmknnBinaryWriter.Write(outputPath, ivf);
+            Console.WriteLine($"Writing {outputPath}...");
+            ExactBinaryWriter.Write(outputPath, padded, labelArr, n);
+            Console.WriteLine($"Done in {sw.Elapsed.TotalSeconds:F1}s. {n} vectors, format=exact, file size: {new FileInfo(outputPath).Length:N0} bytes");
+        }
         else
-            IvfBinaryWriter.Write(outputPath, ivf, nprobe);
+        {
+            Console.WriteLine($"Building index: format={format}, clusters={numClusters}, iterations={kmeansIter}...");
+            var ivf = IvfBuilder.Build(vectors.ToArray(), labels.ToArray(), numClusters, kmeansIter);
+            Console.WriteLine($"Writing {outputPath}...");
 
-        Console.WriteLine($"Done in {sw.Elapsed.TotalSeconds:F1}s. {ivf.NumVectors} vectors, {ivf.NumClusters} clusters, format={format}, file size: {new FileInfo(outputPath).Length:N0} bytes");
+            if (format == "kmknn")
+                KmknnBinaryWriter.Write(outputPath, ivf);
+            else
+                IvfBinaryWriter.Write(outputPath, ivf, nprobe);
+
+            Console.WriteLine($"Done in {sw.Elapsed.TotalSeconds:F1}s. {ivf.NumVectors} vectors, {ivf.NumClusters} clusters, format={format}, file size: {new FileInfo(outputPath).Length:N0} bytes");
+        }
         return 0;
     }
 }
