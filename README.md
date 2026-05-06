@@ -54,11 +54,22 @@ The API never returns a 5xx. On any unexpected parse/IO error the handler falls 
 ## Build & run
 
 ```bash
-make preprocess    # downloads references.json.gz (~48 MB) and builds data/ivf.bin (~140s)
+make preprocess         # downloads references.json.gz (~48 MB) and builds data/ivf.bin (~140s)
+make preprocess-exact   # builds the float32 oracle data/exact.bin (~3s)
 make docker-build
 make docker-up
 curl http://localhost:9999/ready
 ```
+
+## Accuracy harness
+
+```bash
+make accuracy                              # 10 000 synthetic queries, default seed
+make accuracy ACC_SEED=42                  # different seed
+make accuracy ACC_COUNT=100000 ACC_SEED=7  # stress the tail
+```
+
+Generates random 14-d queries and compares the production `IvfDetector` against the brute-force `ExactDetector` oracle. Reports approval-level disagreements, false-positive vs false-negative breakdown, fraud-count mismatches, and per-query latencies for both. Exits non-zero on any disagreement.
 
 ## Load test
 
@@ -120,10 +131,11 @@ The rinha scoring formula rewards both p99 latency and detection accuracy, so we
 - **AoSoA-block layout** — vectors stored in 8-vector blocks, dim-pair-interleaved, so one AVX2 `MultiplyAddAdjacent` computes 8 distances in parallel (output = 8 int32 partial distances, one per vector lane).
 - **Block padding** — last block padded to 8 with zero rows; the scan loop guards via `validLanes < 8`.
 - **Per-cluster int16 bbox** for the lower-bound test (above).
-- **Adaptive nprobe**: `nprobeFast=5` on the first pass; if the result is borderline (fraudCount ∈ [2..4]), redo with `nprobeFull=40` + bbox repair. Saves ~70% of work on the easy queries.
+- **Provably-correct two-stage scan with float32 rerank** — Stage 1 runs a full int16 search over all 4096 clusters with bbox lower-bound pruning and keeps the top-32 candidates. Stage 2 looks each candidate's *original* index up in a parallel `exact.bin` (flat float32 mirror of `references.json.gz`) and reranks with float32 L2 distance. **Verified: 0 disagreements with the brute-force float32 oracle across 20 000 synthetic queries on two independent seeds.**
+- **`OriginalIndices` slot table** — at preprocess time, alongside the int16 vectors and labels, we store the original index in `references.json.gz` per slot (with `-1` for padding). At query time, `IvfDetector` uses this to fetch the *exact* float32 reference vector for rerank, instead of dequantizing the int16 (which loses 1.2·10⁻⁴ of precision per dim).
 - **Top-5 fixed-size max-heap on stack** — `int* heapIdx` and `int* heapDist`, all sift-down / push / replace-top inlined.
-- **mmap'd binary** — index loaded `MemoryMappedFileAccess.Read`, OS handles paging; the runtime image bakes the `.bin` in so the container needs no host volumes.
-- **Magic-byte dispatch** — `IFraudDetector.Open` reads the first 4 bytes (`IVFR` / `KMKN`) and picks the matching detector. Lets us swap algorithms without changing the API.
+- **mmap'd binary** — both `ivf.bin` and `exact.bin` mapped `MemoryMappedFileAccess.Read`, OS handles paging; the runtime image bakes both files in so the container needs no host volumes.
+- **Magic-byte dispatch** — `IFraudDetector.Open` reads the first 4 bytes (`IVFR` / `KMKN` / `EXCT`) and picks the matching detector. Lets us swap algorithms without changing the API. The HTTP server uses `IvfDetector.OpenWithExactRerank` when both files are available.
 
 ### Build & deploy
 
@@ -140,10 +152,13 @@ A few of the things we discovered the hard way:
 4. **AOT means no JIT warmup, but cold caches are still real.** First-request latency was ~50× p50 until we added the page prefault + 200-query KNN warmup. Don't trust "AOT = ready instantly".
 5. **Int16 quantization is a free 2× speedup for KNN.** Once the score is rounded to 4 decimals (which the rinha reference vectors are anyway), float32 precision past `scale=4096` is wasted. AVX2 holds 8 int16 lanes vs 4 float32, and `MultiplyAddAdjacent` does the squared-diff accumulator in one instruction.
 6. **VP-Tree was the wrong shape.** Our first index was a vantage-point tree — recursive, branchy, fundamentally serial per query. It wouldn't vectorize. Switching to IVF (flat clusters, batch-scannable) was the architectural lever that unlocked all the SIMD work that followed.
-7. **Adaptive nprobe is the cheapest correctness fix.** Most queries are decisively safe (0–1 fraud neighbors) or decisively risky (5). Spending the full 40-cluster scan on every query is wasteful — only the borderline 2–4 cases need it. Costs nothing on the easy ones, fixes the hard ones.
-8. **Memory headroom you don't think you need, you need.** Setting limits to exactly 350 MB (the rule cap) caused intermittent OOM-kills under load — Kestrel and glibc occasionally bump the working set transiently. 12 MB of slack made it stable.
-9. **`ValueTextEquals("name"u8)` always beats string comparison.** Idiom worth internalizing — works on the raw UTF-8 bytes of the buffer, no string materialized, no allocator hit.
-10. **Server-Timing was useful in dev, dangerous in submission.** We added a `Server-Timing: app;dur=…` header to attribute time between LB hops and server compute during k6 load tests. Removed it for submission — the per-request `Stopwatch.GetElapsedTime` + dictionary write was a few hundred nanoseconds we didn't need to spend in the official run.
+7. **Adaptive `nprobeFast` cost us correctness without buying meaningful latency.** We were skipping the full pass whenever the fast pass returned 0, 1, or 5 frauds — but `nprobe=5/4096` is far from exhaustive, so it could (and did) misreport a clear case as a clear case. Replacing it with one always-on full pass at `nprobeFull=40` + bbox repair, plus a 32-candidate rerank, took us from 281 disagreements / 10 000 to 0.
+
+8. **Dequantizing int16 is not the same as the original float32.** Our first 100 % attempt reranked top-32 by *unpacking* the int16 stored vectors back to float32. With `scale=4096`, that round trip loses ~1.2·10⁻⁴ of precision per dim — enough to flip the rank of vectors near the K-th boundary. Storing the original global index in `ivf.bin` (`OriginalIndices`, int32 per slot) and looking the *exact* float32 reference up in a parallel `exact.bin` mmap closed the gap to literally zero.
+9. **Memory headroom you don't think you need, you need.** Setting limits to exactly 350 MB (the rule cap) caused intermittent OOM-kills under load — Kestrel and glibc occasionally bump the working set transiently. 12 MB of slack made it stable.
+10. **`ValueTextEquals("name"u8)` always beats string comparison.** Idiom worth internalizing — works on the raw UTF-8 bytes of the buffer, no string materialized, no allocator hit.
+11. **Server-Timing was useful in dev, dangerous in submission.** We added a `Server-Timing: app;dur=…` header to attribute time between LB hops and server compute during k6 load tests. Removed it for submission — the per-request `Stopwatch.GetElapsedTime` + dictionary write was a few hundred nanoseconds we didn't need to spend in the official run.
+12. **A correctness oracle pays for itself.** Building a float32 brute-force `ExactDetector` and an `accuracy` subcommand that diffs IVF vs oracle on synthetic queries took ~150 lines of code. It found the two precision bugs above (adaptive trigger + int16 dequant rerank) within minutes of being wired up — bugs that would have shown as silent score drops in the official run with no actionable signal.
 
 ## Repository layout
 
@@ -153,13 +168,15 @@ src/Api/
   TransactionParser.cs       # zero-alloc JSON → 14-dim float vector
   SimdDistance.cs            # AVX2 / NEON / FMA / scalar fallback
   FraudDetector/
-    IFraudDetector.cs        # magic-byte dispatch (IVFR / KMKN)
-    Ivf/                     # IVF index — production path
+    IFraudDetector.cs        # magic-byte dispatch (IVFR / KMKN / EXCT)
+    Ivf/                     # IVF index — production path (int16 + float32 rerank)
     Kmknn/                   # alternative index (cluster-pruning KNN)
+    Exact/                   # flat float32 brute-force — used as rerank oracle
   Commands/
-    PreprocessCommand.cs     # builds .bin from references.json.gz
+    PreprocessCommand.cs     # builds .bin (ivf | kmknn | exact) from references.json.gz
+    AccuracyCommand.cs       # offline: synthetic queries, IVF vs ExactDetector mismatch report
   Preprocessing/
-    IvfBuilder.cs            # parallel k-means, int16 quantization
+    IvfBuilder.cs            # parallel k-means, int16 quantization, original-index map
 
 docker/
   Dockerfile                 # multi-stage AOT, builds .bin during image build
