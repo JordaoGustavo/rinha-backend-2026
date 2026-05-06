@@ -17,7 +17,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
     private readonly MemoryMappedViewAccessor? _exactAccessor;
     private readonly float* _exactVectors; // null if not loaded
 
-    private readonly float* _centroids;
+    private readonly short* _centroids;
     private readonly short* _bboxMin;
     private readonly short* _bboxMax;
     private readonly IvfBinaryFormat.ClusterMeta* _clusterMeta;
@@ -30,7 +30,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
     public int TotalSlots { get; }
     public int NprobeFast { get; }
     public int NprobeFull { get; }
-    public string Description => $"IVF v6 SoA-block {NumClusters} clusters, int16 + f32-rerank, nprobe={NprobeFull}";
+    public string Description => $"IVF v7 SoA-block {NumClusters} clusters, int16 centroids+vectors + f32-rerank, nprobe={NprobeFull}";
 
     private IvfDetector(MemoryMappedFile mmf, MemoryMappedViewAccessor accessor, byte* basePtr,
         int numVectors, int numClusters, int totalSlots, int nprobeFast, int nprobeFull,
@@ -51,7 +51,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
         NprobeFast = envFast > 0 ? envFast : nprobeFast;
         NprobeFull = envFull > 0 ? envFull : nprobeFull;
 
-        _centroids = (float*)(_basePtr + IvfBinaryFormat.CentroidsOffset);
+        _centroids = (short*)(_basePtr + IvfBinaryFormat.CentroidsOffset);
         _bboxMin = (short*)(_basePtr + IvfBinaryFormat.BboxMinOffset(numClusters));
         _bboxMax = (short*)(_basePtr + IvfBinaryFormat.BboxMaxOffset(numClusters));
         _clusterMeta = (IvfBinaryFormat.ClusterMeta*)(_basePtr + IvfBinaryFormat.ClusterMetaOffset(numClusters));
@@ -246,15 +246,15 @@ public sealed unsafe class IvfDetector : IFraudDetector
         int numClusters = NumClusters;
         int actualNprobe = Math.Min(nprobe, numClusters);
 
-        int*   probeList  = stackalloc int[actualNprobe];
-        float* probeDists = stackalloc float[actualNprobe];
+        int* probeList  = stackalloc int[actualNprobe];
+        int* probeDists = stackalloc int[actualNprobe];
         int probeCount = 0;
 
         long t0 = ticksOut != null ? Stopwatch.GetTimestamp() : 0;
 
         for (int c = 0; c < numClusters; c++)
         {
-            float dist = SimdDistance.EuclideanSquaredPtr(qFloat, _centroids + c * pd);
+            int dist = SimdDistance.Int16L2Squared(qInt, _centroids + c * pd);
 
             if (probeCount < actualNprobe)
             {
@@ -492,7 +492,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void SiftDownProbe(int* list, float* dists, int size, int i)
+    private static void SiftDownProbe(int* list, int* dists, int size, int i)
     {
         while (true)
         {

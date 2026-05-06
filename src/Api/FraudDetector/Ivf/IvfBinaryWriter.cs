@@ -106,7 +106,14 @@ public static class IvfBinaryWriter
         bw.Write((uint)totalSlots);
         bw.Write(new byte[IvfBinaryFormat.HeaderSize - 10 * 4]);
 
-        WriteFloatArray(bw, ivf.Centroids, k * pd);
+        // v7: centroids stored as int16 (scale=4096), matching the
+        // query-side quantization. Stage-1 centroid scan now uses
+        // SimdDistance.Int16L2Squared instead of float L2 — same
+        // ranking precision with half the bandwidth.
+        var int16Centroids = new short[k * pd];
+        for (int i = 0; i < k * pd; i++)
+            int16Centroids[i] = ClampToShort(ivf.Centroids[i] * scale);
+        WriteShortArray(bw, int16Centroids, k * pd);
         WriteShortArray(bw, bboxMin, k * pd);
         WriteShortArray(bw, bboxMax, k * pd);
 
