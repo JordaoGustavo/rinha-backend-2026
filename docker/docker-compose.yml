@@ -25,6 +25,7 @@ services:
     environment:
       - INDEX_PATH=${INDEX_PATH:-/data/ivf.bin}
       - EXACT_PATH=${EXACT_PATH:-/data/exact.bin}
+      - SERVER_TIMING=${SERVER_TIMING:-0}
       - SOCKET_PATH=/run/sock/api1.sock
     volumes:
       - sock:/run/sock
@@ -45,6 +46,7 @@ services:
     environment:
       - INDEX_PATH=${INDEX_PATH:-/data/ivf.bin}
       - EXACT_PATH=${EXACT_PATH:-/data/exact.bin}
+      - SERVER_TIMING=${SERVER_TIMING:-0}
       - SOCKET_PATH=/run/sock/api2.sock
     volumes:
       - sock:/run/sock

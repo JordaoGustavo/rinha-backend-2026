@@ -1,0 +1,27 @@
+# Dev-iteration Dockerfile: skips preprocess (bins are bind-mounted from
+# host ./data/ via docker-compose.yml). Use ./Makefile docker-build-dev.
+# AOT publish only.
+
+FROM mcr.microsoft.com/dotnet/sdk:11.0-preview AS build
+ARG RUNTIME_ID=linux-x64
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends clang zlib1g-dev ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY src/Api/ src/Api/
+
+RUN dotnet publish src/Api/Api.csproj -c Release -r ${RUNTIME_ID} -o /app
+
+FROM mcr.microsoft.com/dotnet/runtime-deps:11.0-preview
+WORKDIR /app
+COPY --from=build /app .
+COPY resources/mcc_risk.json      /resources/mcc_risk.json
+COPY resources/normalization.json /resources/normalization.json
+
+ENV INDEX_PATH=/data/ivf.bin
+ENV EXACT_PATH=/data/exact.bin
+ENV RESOURCES_PATH=/resources
+ENV API_PORT=8080
+ENTRYPOINT ["./Api"]

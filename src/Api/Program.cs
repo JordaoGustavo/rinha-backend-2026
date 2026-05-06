@@ -1,7 +1,11 @@
+using System.Diagnostics;
 using System.IO.Pipelines;
+using System.Text;
 using Rinha.Api;
 
 ThreadPool.SetMinThreads(8, 8);
+
+bool serverTimingEnabled = Environment.GetEnvironmentVariable("SERVER_TIMING") == "1";
 
 if (args.Length > 0)
 {
@@ -87,6 +91,8 @@ if (!string.IsNullOrEmpty(socketPath))
     });
 }
 
+double tickToUs = 1_000_000.0 / Stopwatch.Frequency;
+
 app.Run(async (HttpContext ctx) =>
 {
     var path = ctx.Request.Path;
@@ -111,10 +117,34 @@ app.Run(async (HttpContext ctx) =>
     var body = result.Buffer;
     try
     {
-        var (approved, fraudCount) = ProcessRequest(detector, body.FirstSpan);
+        long tStart = serverTimingEnabled ? Stopwatch.GetTimestamp() : 0;
+        bool approved;
+        int fraudCount;
+        long parseTicks = 0;
+        long[]? scoreTicks = null;
+        if (serverTimingEnabled && detector is IvfDetector ivf)
+        {
+            (approved, fraudCount, parseTicks, scoreTicks) = ProcessRequestTimed(ivf, body.FirstSpan);
+        }
+        else
+        {
+            (approved, fraudCount) = ProcessRequest(detector, body.FirstSpan);
+        }
         var responseBody = responses.Get(approved, fraudCount);
         ctx.Response.ContentLength = responseBody.Length;
         ctx.Response.ContentType = "application/json";
+        if (serverTimingEnabled && scoreTicks != null)
+        {
+            long total = Stopwatch.GetTimestamp() - tStart;
+            var sb = new StringBuilder(160);
+            sb.Append("parse;dur=").Append((parseTicks * tickToUs).ToString("F2"));
+            sb.Append(", s1-cent;dur=").Append((scoreTicks[0] * tickToUs).ToString("F2"));
+            sb.Append(", s1-scan;dur=").Append((scoreTicks[1] * tickToUs).ToString("F2"));
+            sb.Append(", s1-bbox;dur=").Append((scoreTicks[2] * tickToUs).ToString("F2"));
+            sb.Append(", s2-rerank;dur=").Append((scoreTicks[3] * tickToUs).ToString("F2"));
+            sb.Append(", total;dur=").Append((total * tickToUs).ToString("F2"));
+            ctx.Response.Headers["Server-Timing"] = sb.ToString();
+        }
         var writer = ctx.Response.BodyWriter;
         var dst = writer.GetSpan(responseBody.Length);
         responseBody.CopyTo(dst);
@@ -147,6 +177,22 @@ static (bool Approved, int FraudCount) ProcessRequest(IFraudDetector detector, R
     vector.Clear();
     TransactionParser.Parse(json, vector);
     return detector.Score(vector);
+}
+
+static unsafe (bool Approved, int FraudCount, long ParseTicks, long[] ScoreTicks)
+    ProcessRequestTimed(IvfDetector detector, ReadOnlySpan<byte> json)
+{
+    Span<float> vector = stackalloc float[16];
+    vector.Clear();
+    long t0 = Stopwatch.GetTimestamp();
+    TransactionParser.Parse(json, vector);
+    long t1 = Stopwatch.GetTimestamp();
+    var ticks = new long[IvfDetector.TimingsCount];
+    fixed (long* p = ticks)
+    {
+        var (approved, fraudCount) = detector.ScoreWithTimings(vector, p);
+        return (approved, fraudCount, t1 - t0, ticks);
+    }
 }
 
 public sealed class ResponseCache
