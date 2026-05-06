@@ -79,6 +79,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
     {
         const int pd = IvfBinaryFormat.PaddedDims;
         const int scale = IvfBinaryFormat.Scale;
+        const int rerankN = 32;
 
         short* qInt = stackalloc short[pd];
         for (int d = 0; d < pd; d++)
@@ -93,24 +94,59 @@ public sealed unsafe class IvfDetector : IFraudDetector
         for (int kp = 0; kp < pd / 2; kp++)
             qPairs[kp] = ((ushort)qInt[2 * kp]) | ((ushort)qInt[2 * kp + 1] << 16);
 
-        Span<int> idxs = stackalloc int[5];
-        int count;
+        // All hot-path buffers allocated ONCE, before any loop, so we don't
+        // grow the stack frame across the 32 rerank iterations.
+        Span<int>   candidateIdx = stackalloc int[rerankN];
+        float*      candVec      = stackalloc float[pd];
+        Span<int>   topIdx       = stackalloc int[5];
+        Span<float> topDist      = stackalloc float[5];
+
         int fraudCount;
         fixed (float* qFloat = query)
         {
-            count = FindKNearest(qFloat, qInt, qPairs, 5, idxs, NprobeFast, useBboxRepair: false);
-            fraudCount = 0;
-            for (int i = 0; i < count; i++)
-                fraudCount += _labels[idxs[i]];
+            // Stage 1: provably-correct int16 search over all 4096 clusters.
+            //   NprobeFull seeds the heap with the closest centroids;
+            //   useBboxRepair=true then visits every other cluster whose
+            //   bbox lower-bound ≤ current worst-K. Output is top-rerankN
+            //   by int16 distance.
+            int candidateCount = FindKNearest(qFloat, qInt, qPairs, rerankN, candidateIdx,
+                                              NprobeFull, useBboxRepair: true);
 
-            if (fraudCount >= 2 && fraudCount <= 4)
+            // Stage 2: float32 rerank to absorb int16 quantization rank-flips.
+            int topSize = 0;
+            for (int i = 0; i < candidateCount; i++)
             {
-                count = FindKNearest(qFloat, qInt, qPairs, 5, idxs, NprobeFull, useBboxRepair: true);
-                fraudCount = 0;
-                for (int i = 0; i < count; i++)
-                    fraudCount += _labels[idxs[i]];
+                int vecIdx = candidateIdx[i];
+                UnpackFloat(vecIdx, candVec, pd, scale);
+                float dist = SimdDistance.EuclideanSquaredPtr(qFloat, candVec);
+
+                if (topSize < 5)
+                {
+                    int p = topSize++;
+                    topIdx[p] = vecIdx; topDist[p] = dist;
+                    int j = p;
+                    while (j > 0)
+                    {
+                        int parent = (j - 1) >> 1;
+                        if (topDist[parent] >= topDist[j]) break;
+                        (topIdx[parent], topIdx[j]) = (topIdx[j], topIdx[parent]);
+                        (topDist[parent], topDist[j]) = (topDist[j], topDist[parent]);
+                        j = parent;
+                    }
+                }
+                else if (dist < topDist[0])
+                {
+                    topIdx[0] = vecIdx;
+                    topDist[0] = dist;
+                    SiftDownFloat(topIdx, topDist, 5, 0);
+                }
             }
+
+            fraudCount = 0;
+            for (int i = 0; i < topSize; i++)
+                fraudCount += _labels[topIdx[i]];
         }
+
         return (fraudCount < 3, fraudCount);
     }
 
@@ -313,6 +349,38 @@ public sealed unsafe class IvfDetector : IFraudDetector
                 else if (dist < heapDist[0])
                     HeapReplaceTop(heapIdx, heapDist, k, vecIdx, dist);
             }
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void UnpackFloat(int vecIdx, float* dest, int pd, int scale)
+    {
+        const int bv = IvfBinaryFormat.BlockVectors;
+        int blockId  = vecIdx / bv;
+        int laneId   = vecIdx - blockId * bv;
+        short* blockPtr = _vectors + blockId * pd * bv;
+        float invScale = 1.0f / scale;
+        for (int kp = 0; kp < pd / 2; kp++)
+        {
+            short s0 = blockPtr[kp * 16 + laneId * 2];
+            short s1 = blockPtr[kp * 16 + laneId * 2 + 1];
+            dest[2 * kp]     = s0 * invScale;
+            dest[2 * kp + 1] = s1 * invScale;
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void SiftDownFloat(Span<int> idx, Span<float> dist, int size, int i)
+    {
+        while (true)
+        {
+            int largest = i, l = 2 * i + 1, r = 2 * i + 2;
+            if (l < size && dist[l] > dist[largest]) largest = l;
+            if (r < size && dist[r] > dist[largest]) largest = r;
+            if (largest == i) break;
+            (idx[largest], idx[i]) = (idx[i], idx[largest]);
+            (dist[largest], dist[i]) = (dist[i], dist[largest]);
+            i = largest;
         }
     }
 
