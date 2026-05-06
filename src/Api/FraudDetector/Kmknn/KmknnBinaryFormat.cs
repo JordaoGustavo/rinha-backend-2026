@@ -1,0 +1,41 @@
+using System.Runtime.InteropServices;
+
+namespace Rinha.Api;
+
+public static class KmknnBinaryFormat
+{
+    public static ReadOnlySpan<byte> Magic => "KMKN"u8;
+    public const uint Version = 4;
+    public const int HeaderSize = 64;
+    public const int Dims = 14;
+    public const int PaddedDims = 16;
+    public const int Int16VectorBytes = PaddedDims * sizeof(short);
+    public const int Scale = 4096;
+
+    [StructLayout(LayoutKind.Sequential, Pack = 1)]
+    public struct ClusterMeta
+    {
+        public uint Offset;
+        public uint Count;
+    }
+
+    public static long CentroidsOffset => HeaderSize;
+
+    public static long BboxMinOffset(int numClusters) =>
+        CentroidsOffset + (long)numClusters * Int16VectorBytes;
+
+    public static long BboxMaxOffset(int numClusters) =>
+        BboxMinOffset(numClusters) + (long)numClusters * Int16VectorBytes;
+
+    public static long ClusterMetaOffset(int numClusters) =>
+        BboxMaxOffset(numClusters) + (long)numClusters * Int16VectorBytes;
+
+    public static long VectorsOffset(int numClusters) =>
+        ClusterMetaOffset(numClusters) + (long)numClusters * 8;
+
+    public static long LabelsOffset(int numClusters, int numVectors) =>
+        VectorsOffset(numClusters) + (long)numVectors * Int16VectorBytes;
+
+    public static long TotalSize(int numClusters, int numVectors) =>
+        LabelsOffset(numClusters, numVectors) + numVectors;
+}
