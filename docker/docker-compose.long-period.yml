@@ -1,0 +1,81 @@
+# Diagnostic: cpu_period back to the kernel default of 100ms (vs our tuned 10ms).
+#
+# Purpose: if CFS throttling is driving the P99 tail, this run will show
+# P99 ~90ms (worst-case throttle = period - quota = 90ms). If P99 stays
+# near the same ~10ms, throttling isn't the dominant tail source, and the
+# remaining tail comes from elsewhere (Kestrel/ASP.NET pipeline, GC, etc).
+#
+# Total CPU bandwidth is identical (10% / 40% / 40%): only the period scale
+# changes. quota:period ratios are kept proportional.
+
+services:
+  haproxy:
+    image: haproxy:3.1-alpine
+    ports:
+      - "9999:9999"
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - sock:/run/sock
+    cpuset: "0"
+    cpu_period: 100000
+    cpu_quota:   20000        # 20% of 100ms = 0.20 CPU
+    deploy:
+      resources:
+        limits:
+          memory: "10MB"
+    depends_on:
+      - api1
+      - api2
+    networks:
+      - rinha
+
+  api1:
+    image: rinha/api:latest
+    security_opt:
+      - seccomp=unconfined
+    environment:
+      - INDEX_PATH=${INDEX_PATH:-/data/ivf.bin}
+      - SOCKET_PATH=/run/sock/api1.sock
+    volumes:
+      - sock:/run/sock
+      - ../data:/data:ro
+    cpuset: "1,2"
+    cpu_period: 100000
+    cpu_quota:   40000        # 40% of 100ms = 0.40 CPU
+    deploy:
+      resources:
+        limits:
+          memory: "170MB"
+    networks:
+      - rinha
+
+  api2:
+    image: rinha/api:latest
+    security_opt:
+      - seccomp=unconfined
+    environment:
+      - INDEX_PATH=${INDEX_PATH:-/data/ivf.bin}
+      - SOCKET_PATH=/run/sock/api2.sock
+    volumes:
+      - sock:/run/sock
+      - ../data:/data:ro
+    cpuset: "2,3"
+    cpu_period: 100000
+    cpu_quota:   40000
+    deploy:
+      resources:
+        limits:
+          memory: "170MB"
+    networks:
+      - rinha
+
+volumes:
+  sock:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=1m,nr_inodes=8,mode=0777,noatime,nosuid,nodev"
+
+networks:
+  rinha:
+    driver: bridge

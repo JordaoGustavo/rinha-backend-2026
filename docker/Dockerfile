@@ -1,0 +1,42 @@
+# Multi-stage build: download resources + build IVF index + AOT compile API.
+# The image is fully self-contained — running it requires no host volumes.
+
+FROM mcr.microsoft.com/dotnet/sdk:11.0-preview AS build
+ARG RUNTIME_ID=linux-x64
+ARG RESOURCES_BASE_URL=https://raw.githubusercontent.com/zanfranceschi/rinha-de-backend-2026/main/resources
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends clang zlib1g-dev curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+# Reference data + lookup tables. Curl in the SAME RUN so the cache invalidates
+# atomically when any of the three files change upstream.
+RUN mkdir -p /resources \
+ && curl -fsSL "$RESOURCES_BASE_URL/references.json.gz" -o /resources/references.json.gz \
+ && curl -fsSL "$RESOURCES_BASE_URL/mcc_risk.json"      -o /resources/mcc_risk.json \
+ && curl -fsSL "$RESOURCES_BASE_URL/normalization.json" -o /resources/normalization.json
+
+COPY src/Api/ src/Api/
+
+# Build the IVF index using `dotnet run` (works on any build arch — the .bin is
+# plain little-endian bytes). Default: 4096 clusters, 20 k-means iters, nprobe 35.
+RUN mkdir -p /data \
+ && dotnet run --project src/Api/Api.csproj -c Release -- \
+        preprocess /resources/references.json.gz /data/ivf.bin 0 20 ivf 35
+
+# AOT publish for the target runtime.
+RUN dotnet publish src/Api/Api.csproj -c Release -r ${RUNTIME_ID} -o /app
+
+FROM mcr.microsoft.com/dotnet/runtime-deps:11.0-preview
+WORKDIR /app
+COPY --from=build /app .
+COPY --from=build /resources/mcc_risk.json      /resources/mcc_risk.json
+COPY --from=build /resources/normalization.json /resources/normalization.json
+COPY --from=build /data/ivf.bin                 /data/ivf.bin
+
+ENV INDEX_PATH=/data/ivf.bin
+ENV RESOURCES_PATH=/resources
+ENV API_PORT=8080
+ENTRYPOINT ["./Api"]

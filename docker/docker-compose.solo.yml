@@ -1,0 +1,34 @@
+# Single-instance experiment: 1 API container with full 1 CPU, no HAProxy.
+#
+# Goal: isolate HAProxy + 2-API-LB overhead. If P99 drops dramatically vs
+# the 3-container setup, the LB hop is the dominant tail-latency source.
+#
+# Total CPU budget: 1.0 (rinha rule respected) — given entirely to the API.
+# Memory budget: 350MB (full rinha allowance).
+# CFS period kept at 10ms for short throttling windows under burst.
+
+services:
+  api:
+    image: rinha/api:latest
+    security_opt:
+      - seccomp=unconfined
+    environment:
+      - INDEX_PATH=${INDEX_PATH:-/data/ivf.bin}
+      - API_PORT=9999            # listens on TCP directly (no SOCKET_PATH → Kestrel uses ListenAnyIP)
+    ports:
+      - "9999:9999"
+    volumes:
+      - ../data:/data:ro
+    cpuset: "0,1,2,3"            # all 4 cores available for elasticity
+    cpu_period: 10000
+    cpu_quota:  10000            # full 1 CPU bandwidth
+    deploy:
+      resources:
+        limits:
+          memory: "350MB"
+    networks:
+      - rinha
+
+networks:
+  rinha:
+    driver: bridge
