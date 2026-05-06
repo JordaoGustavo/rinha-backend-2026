@@ -98,31 +98,81 @@ fraudCount mismatches: 0
 
 Mudança é matematicamente equivalente — mesmos clusters escaneados, mesmos top-K candidatos.
 
+## Otimização aplicada: async fast-path no Kestrel
+
+Trocado `await pipeReader.ReadAtLeastAsync(...)` por `TryRead` em loop curto com `SpinWait.SpinOnce()` (até 8 tentativas):
+
+```csharp
+SpinWait spinner = default;
+for (int attempt = 0; attempt < 8; attempt++)
+{
+    if (pipeReader.TryRead(out result))
+    {
+        if (result.Buffer.Length >= needed) { haveBody = true; break; }
+        pipeReader.AdvanceTo(result.Buffer.Start, result.Buffer.End);
+    }
+    spinner.SpinOnce();
+}
+if (!haveBody) result = await pipeReader.ReadAtLeastAsync(...);
+```
+
+Body chega quase sempre em microssegundos pelo splice do haproxy → o `await` antigo custava context switch + task continuation desnecessários.
+
+## Resultados finais (bitset + async fast-path, 4096 clusters)
+
+```
+varied: avg=5.26ms  med=5.25ms  p95=11.05ms  p99=18.44ms  max=121ms (outlier)  req/s=3544
+fixed:  avg=4.58ms  med=1.82ms  p95=10.64ms  p99=17.87ms  max=38.85ms          req/s=4069
+```
+
+Comparação total contra baseline limpa (varied):
+
+| Métrica | Baseline | Final | Δ |
+|--|--|--|--|
+| avg | 8.55ms | 5.26ms | **-38%** |
+| p50 | 8.97ms | 5.25ms | -41% |
+| p95 | 18.69ms | 11.05ms | -41% |
+| **p99** | 22.54ms | **18.44ms** | **-18%** |
+| **req/s** | 2190 | **3544** | **+62%** |
+
+Comparação fixed payload contra número original do usuário (máquina dele):
+
+| Métrica | Original (sua máquina) | Final (minha máquina, mais lenta no avg) |
+|--|--|--|
+| avg | 6.48ms | 4.58ms |
+| p50 | 1.49ms | 1.82ms |
+| p95 | 73.59ms | 10.64ms |
+| p99 | 81.80ms | 17.87ms |
+| req/s | 2888 | 4069 |
+
+(parte da diferença vs número original era da imagem ghcr rodando há 47min sem restart — a baseline limpa local tinha p99 ≈ 22ms.)
+
 ## Outras alavancas tentadas
 
 | Alavanca | Resultado | Conclusão |
 |--|--|--|
 | `madvise(MADV_HUGEPAGE)` no Prefault | p99 ≈ igual, throughput -6%, max -25% | Custo de defrag do kernel ≈ ganho de TLB. Revertido. |
 | Sort+early-exit no bbox repair | Análise: o atual já filtra com `lb ≤ worstDist`. Sort adiciona O(n log n) sem economizar trabalho real. | Descartado sem implementar. |
+| Reduzir nclusters 4096 → 2048 (nprobe=18) | Accuracy 100% em 3 seeds (30k queries). Mas k6: throughput **-17% no fixed**, p50 **+147%**, p99 **+7%**. | Empírico: PIOROU. Cluster maior (1465 vetores vs 720) tem custo per-scan maior que ganho do half centroid+bbox. 4096 é sweet spot. Revertido. |
 
 ## Alavancas mapeadas mas NÃO atacadas
 
-Em ordem de leverage estimado para p99 do http_req:
+1. **Hierarquia de centroids** (2-level k-means: 64 super → 64 sub × 64 = 4096 leaves): probing log-time. Refatoração média + novo formato `.bin`. Maior impacto teórico em latência média, mas tempo alto.
 
-1. **Async fast-path no Kestrel**: substituir `await pipeReader.ReadAtLeastAsync(...)` por TryRead em loop curto com `Thread.SpinWait`. Ataca os ~10ms de overhead na cauda. Risco médio: pode degradar bem em workloads com body grande / WAN.
+2. **Pre-quantizar centroids para int16** (hoje são float32): centroid scan ficaria 2× mais rápido. Servidor avg cairia ~30µs. Pequeno impacto em p99 do http_req.
 
-2. **Reduzir nclusters** (4096 → 2048 com nprobe=18, ou 1024 com nprobe=9): cortar centroid scan + bbox repair pela metade. Servidor avg cairia de ~250µs para ~150µs. Mas servidor é só 12% do http_req → ganho de p99 esperado < 3%. **Não vale o risco de regressão de accuracy** (precisa re-preprocess + accuracy harness em múltiplas seeds).
-
-3. **Pre-quantizar centroids para int16** (hoje são float32): centroid scan ficaria 2× mais rápido. Servidor avg cairia ~30µs. Idem item 2: pequeno impacto em p99.
-
-4. **Hierarquia de centroids** (2-level k-means: 64 super → 64 sub × 64 = 4096): probing log-time. Refatoração média + novo formato `.bin`. Maior impacto entre os 4, mas custo alto.
+3. **OOM-kill recorrente do haproxy a 8MB**: durante os experimentos o haproxy entrou em loop OOM-kill. Aumentar para 16-32MB resolve, mas estoura o cap de 350MB da rinha. Não atacado — fora do escopo de "perf"; é resilience config.
 
 ## Conclusão à pergunta original
 
 > "é melhor otimizar o código ou mudar a estratégia do índice e tentar tipo diminuir os k-means?"
 
-**Otimizar código** ganhou claramente. O bitset bbox repair entregou **-14% p99 e +46% throughput**, sem regressão de accuracy, em ~50 linhas de código.
+**Otimizar código** ganhou claramente. Duas mudanças cirúrgicas em ~30 linhas totais entregaram:
 
-Reduzir nclusters (k-means menor) atacaria 50% do tempo do servidor — mas como **o servidor é só 12% do http_req**, o impacto em p99 seria < 3%. Risco de regressão de accuracy é alto. **Não vale a pena se o objetivo é p99.**
+- **p99**: 22.54ms → 18.44ms (**-18%**, varied)
+- **throughput**: 2190 → 3544 req/s (**+62%**)
+- **Accuracy**: 100% mantida (10k queries × 3 seeds = 30k validações)
 
-Para mover p99 abaixo de 19ms, a próxima alavanca seria atacar o **overhead HTTP/Kestrel** (~10ms remanescentes na cauda) — não o algoritmo. Isso já é mudança invasiva no path do request.
+Reduzir nclusters (k-means menor) **PIOROU empiricamente** — testado com 2048 + nprobe=18, accuracy 100%, mas k6 mostrou regressão em throughput e p99. Cluster maior tem custo per-scan superior ao ganho do half-centroid+bbox.
+
+Próxima alavanca real (não atacada): hierarquia de centroids ou substituir overhead HTTP residual. Ambas são mudanças mais invasivas.
