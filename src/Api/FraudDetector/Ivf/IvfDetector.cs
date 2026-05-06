@@ -23,7 +23,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
     public int TotalSlots { get; }
     public int NprobeFast { get; }
     public int NprobeFull { get; }
-    public string Description => $"IVF v5 SoA-block {NumClusters} clusters, int16 batched-8, nprobe={NprobeFast}/{NprobeFull}";
+    public string Description => $"IVF v5 SoA-block {NumClusters} clusters, int16 + f32-rerank, nprobe={NprobeFull}";
 
     private IvfDetector(MemoryMappedFile mmf, MemoryMappedViewAccessor accessor, byte* basePtr,
         int numVectors, int numClusters, int totalSlots, int nprobeFast, int nprobeFull)
@@ -356,14 +356,15 @@ public sealed unsafe class IvfDetector : IFraudDetector
     private void UnpackFloat(int vecIdx, float* dest, int pd, int scale)
     {
         const int bv = IvfBinaryFormat.BlockVectors;
+        const int laneStride = 2 * bv;
         int blockId  = vecIdx / bv;
         int laneId   = vecIdx - blockId * bv;
         short* blockPtr = _vectors + blockId * pd * bv;
         float invScale = 1.0f / scale;
         for (int kp = 0; kp < pd / 2; kp++)
         {
-            short s0 = blockPtr[kp * 16 + laneId * 2];
-            short s1 = blockPtr[kp * 16 + laneId * 2 + 1];
+            short s0 = blockPtr[kp * laneStride + laneId * 2];
+            short s1 = blockPtr[kp * laneStride + laneId * 2 + 1];
             dest[2 * kp]     = s0 * invScale;
             dest[2 * kp + 1] = s1 * invScale;
         }
