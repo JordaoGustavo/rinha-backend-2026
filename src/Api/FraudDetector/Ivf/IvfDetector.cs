@@ -287,7 +287,18 @@ public sealed unsafe class IvfDetector : IFraudDetector
         if (ticksOut != null) ticksOut[0] = t1 - t0;
 
         for (int p = 0; p < probeCount; p++)
-            ScanCluster(qInt, qPairs, probeList[p], heapIdx, heapDist, ref heapSize, k);
+        {
+            int cId = probeList[p];
+            // Once the K-heap is full, skip a probed cluster whose bbox lower
+            // bound already exceeds the worst-K. Saves a full ScanCluster
+            // (~3–5 µs) at the cost of a single SIMD lb compute (~50 ns).
+            if (heapSize == k)
+            {
+                int lb = SimdDistance.Int16BboxLowerBound(qInt, _bboxMin + cId * pd, _bboxMax + cId * pd);
+                if (lb > heapDist[0]) continue;
+            }
+            ScanCluster(qInt, qPairs, cId, heapIdx, heapDist, ref heapSize, k);
+        }
 
         long t2 = ticksOut != null ? Stopwatch.GetTimestamp() : 0;
         if (ticksOut != null) ticksOut[1] = t2 - t1;
