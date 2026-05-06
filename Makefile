@@ -18,7 +18,7 @@ download-resources:
 preprocess: download-resources
 	mkdir -p data
 	dotnet run --project src/Api/Api.csproj -c Release -- \
-		preprocess $(CURDIR)/resources/references.json.gz $(CURDIR)/data/ivf.bin 0 20 ivf 35
+		preprocess $(CURDIR)/resources/references.json.gz $(CURDIR)/data/ivf.bin 0 20 ivf 25
 
 docker-build:
 	docker build $(PLATFORM_FLAG) --build-arg RUNTIME_ID=$(RUNTIME_ID) \
