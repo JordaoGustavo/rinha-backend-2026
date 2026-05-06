@@ -1,0 +1,11 @@
+bin/
+obj/
+*.user
+.vs/
+.vscode/
+.claude/
+*.swp
+resources/
+data/
+out/
+BenchmarkDotNet.Artifacts/
