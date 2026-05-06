@@ -1,0 +1,13 @@
+{
+  "participants": ["Gustavo Jordão"],
+  "social": ["https://github.com/JordaoGustavo"],
+  "source-code-repo": "https://github.com/JordaoGustavo/rinha-backend-2026",
+  "stack": [
+    "C#",
+    ".NET 11 (preview, AOT)",
+    "Kestrel",
+    "HAProxy",
+    "Linux x64"
+  ],
+  "open_to_work": true
+}
