@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO.MemoryMappedFiles;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
@@ -128,7 +129,24 @@ public sealed unsafe class IvfDetector : IFraudDetector
         }
     }
 
+    /// <summary>
+    /// Per-stage timing layout for ScoreWithTimings: 4 longs = ticks for
+    /// [centroidScan, initialClusterScan, bboxRepairPass, float32Rerank].
+    /// </summary>
+    public const int TimingsCount = 4;
+
     public (bool Approved, int FraudCount) Score(ReadOnlySpan<float> query)
+        => ScoreCore(query, ticksOut: null);
+
+    /// <summary>
+    /// Dev-only path. Same algorithm as <see cref="Score"/>, but writes
+    /// per-stage tick counts to <paramref name="ticksOut"/> (length 4).
+    /// </summary>
+    public (bool Approved, int FraudCount) ScoreWithTimings(ReadOnlySpan<float> query, long* ticksOut)
+        => ScoreCore(query, ticksOut);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private (bool Approved, int FraudCount) ScoreCore(ReadOnlySpan<float> query, long* ticksOut)
     {
         const int pd = IvfBinaryFormat.PaddedDims;
         const int scale = IvfBinaryFormat.Scale;
@@ -163,7 +181,9 @@ public sealed unsafe class IvfDetector : IFraudDetector
             //   bbox lower-bound ≤ current worst-K. Output is top-rerankN
             //   by int16 distance.
             int candidateCount = FindKNearest(qFloat, qInt, qPairs, rerankN, candidateIdx,
-                                              NprobeFull, useBboxRepair: true);
+                                              NprobeFull, useBboxRepair: true, ticksOut);
+
+            long s2Start = ticksOut != null ? Stopwatch.GetTimestamp() : 0;
 
             // Stage 2: float32 rerank using true float32 vectors (from exact.bin if available,
             // otherwise dequantized int16 — exact.bin gives 100% oracle agreement).
@@ -211,13 +231,16 @@ public sealed unsafe class IvfDetector : IFraudDetector
             fraudCount = 0;
             for (int i = 0; i < topSize; i++)
                 fraudCount += _labels[topIdx[i]];
+
+            if (ticksOut != null)
+                ticksOut[3] = Stopwatch.GetTimestamp() - s2Start;
         }
 
         return (fraudCount < 3, fraudCount);
     }
 
     private int FindKNearest(float* qFloat, short* qInt, int* qPairs, int k, Span<int> resultIdx,
-        int nprobe, bool useBboxRepair)
+        int nprobe, bool useBboxRepair, long* ticksOut = null)
     {
         const int pd = IvfBinaryFormat.PaddedDims;
         int numClusters = NumClusters;
@@ -226,6 +249,8 @@ public sealed unsafe class IvfDetector : IFraudDetector
         int*   probeList  = stackalloc int[actualNprobe];
         float* probeDists = stackalloc float[actualNprobe];
         int probeCount = 0;
+
+        long t0 = ticksOut != null ? Stopwatch.GetTimestamp() : 0;
 
         for (int c = 0; c < numClusters; c++)
         {
@@ -258,18 +283,31 @@ public sealed unsafe class IvfDetector : IFraudDetector
         int* heapDist = stackalloc int[k];
         int heapSize = 0;
 
+        long t1 = ticksOut != null ? Stopwatch.GetTimestamp() : 0;
+        if (ticksOut != null) ticksOut[0] = t1 - t0;
+
         for (int p = 0; p < probeCount; p++)
             ScanCluster(qInt, qPairs, probeList[p], heapIdx, heapDist, ref heapSize, k);
 
+        long t2 = ticksOut != null ? Stopwatch.GetTimestamp() : 0;
+        if (ticksOut != null) ticksOut[1] = t2 - t1;
+
         if (useBboxRepair && probeCount < numClusters)
         {
+            // Bitset of already-scanned clusters: O(1) test vs O(probeCount) linear walk.
+            int bitsetWords = (numClusters + 63) >> 6;
+            ulong* scannedBits = stackalloc ulong[bitsetWords];
+            for (int w = 0; w < bitsetWords; w++) scannedBits[w] = 0UL;
+            for (int j = 0; j < probeCount; j++)
+            {
+                int c = probeList[j];
+                scannedBits[c >> 6] |= 1UL << (c & 63);
+            }
+
             int worstDist = heapSize == k ? heapDist[0] : int.MaxValue;
             for (int c = 0; c < numClusters; c++)
             {
-                bool scanned = false;
-                for (int j = 0; j < probeCount; j++)
-                    if (probeList[j] == c) { scanned = true; break; }
-                if (scanned) continue;
+                if ((scannedBits[c >> 6] & (1UL << (c & 63))) != 0) continue;
 
                 int lb = SimdDistance.Int16BboxLowerBound(qInt, _bboxMin + c * pd, _bboxMax + c * pd);
                 if (lb <= worstDist)
@@ -279,6 +317,8 @@ public sealed unsafe class IvfDetector : IFraudDetector
                 }
             }
         }
+
+        if (ticksOut != null) ticksOut[2] = Stopwatch.GetTimestamp() - t2;
 
         int resultCount = heapSize;
         for (int i = heapSize - 1; i >= 0; i--)

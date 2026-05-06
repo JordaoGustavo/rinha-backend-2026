@@ -1,4 +1,4 @@
-.PHONY: download-resources preprocess preprocess-exact accuracy docker-build docker-up docker-down k6 clean
+.PHONY: download-resources preprocess preprocess-exact accuracy docker-build docker-build-dev docker-up docker-down k6 k6-varied clean
 
 ARCH := $(shell uname -m)
 ifeq ($(filter $(ARCH),arm64 aarch64),)
@@ -24,6 +24,10 @@ docker-build:
 	docker build $(PLATFORM_FLAG) --build-arg RUNTIME_ID=$(RUNTIME_ID) \
 		-f docker/Dockerfile -t $(IMAGE) .
 
+docker-build-dev:
+	docker build $(PLATFORM_FLAG) --build-arg RUNTIME_ID=$(RUNTIME_ID) \
+		-f docker/Dockerfile.dev -t $(IMAGE) .
+
 docker-up:
 	$(COMPOSE) up -d
 	@echo "Waiting for /ready..."
@@ -46,6 +50,14 @@ k6:
 		-e VUS="$(K6_VUS)" \
 		-e DURATION="$(K6_DURATION)" \
 		grafana/k6 run /scripts/bench.js
+
+k6-varied:
+	docker run --rm --network host \
+		-v $(CURDIR)/scripts/k6:/scripts:ro \
+		-e API_URL="http://localhost:9999" \
+		-e VUS="$(K6_VUS)" \
+		-e DURATION="$(K6_DURATION)" \
+		grafana/k6 run /scripts/bench-varied.js
 
 preprocess-exact: download-resources
 	mkdir -p data
