@@ -5,7 +5,7 @@ namespace Rinha.Api;
 public static class IvfBinaryFormat
 {
     public static ReadOnlySpan<byte> Magic => "IVFR"u8;
-    public const uint Version = 5;
+    public const uint Version = 6;
     public const int HeaderSize = 64;
     public const int Dims = 14;
     public const int PaddedDims = 16;
@@ -39,6 +39,10 @@ public static class IvfBinaryFormat
     public static long LabelsOffset(int numClusters, int totalVectorSlots) =>
         VectorsOffset(numClusters) + (long)totalVectorSlots * Int16VectorBytes;
 
-    public static long TotalSize(int numClusters, int totalVectorSlots) =>
+    // Original global indices: int32 per slot, stored after labels
+    public static long OriginalIndicesOffset(int numClusters, int totalVectorSlots) =>
         LabelsOffset(numClusters, totalVectorSlots) + totalVectorSlots;
+
+    public static long TotalSize(int numClusters, int totalVectorSlots) =>
+        OriginalIndicesOffset(numClusters, totalVectorSlots) + (long)totalVectorSlots * sizeof(int);
 }

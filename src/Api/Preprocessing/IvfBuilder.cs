@@ -10,6 +10,8 @@ public sealed class IvfResult
     public required byte[] Labels;
     public required int[] ClusterOffsets;
     public required int[] ClusterCounts;
+    // Maps slot index (in clustered order) → original global index (for exact.bin reranking)
+    public required int[] OriginalIndices;
     public int NumVectors;
     public int NumClusters;
 }
@@ -59,6 +61,7 @@ public static class IvfBuilder
 
         var outVectors = new float[n * pd];
         var outLabels = new byte[n];
+        var originalIndices = new int[n];
         var insertPos = new int[numClusters];
 
         for (int i = 0; i < n; i++)
@@ -68,6 +71,7 @@ public static class IvfBuilder
             insertPos[c]++;
             Array.Copy(padded, i * pd, outVectors, destIdx * pd, pd);
             outLabels[destIdx] = inputLabels[i];
+            originalIndices[destIdx] = i;
         }
 
         return new IvfResult
@@ -75,6 +79,7 @@ public static class IvfBuilder
             Centroids = centroids,
             Vectors = outVectors,
             Labels = outLabels,
+            OriginalIndices = originalIndices,
             ClusterOffsets = clusterOffsets,
             ClusterCounts = clusterCounts,
             NumVectors = n,
