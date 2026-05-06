@@ -29,15 +29,11 @@ services:
     volumes:
       - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
       - sock:/run/sock
-    # haproxy: dedicated to core 0 — TCP-mode forwarding is cheap enough
-    # that 20% of 1 core is comfortable; isolating from APIs eliminates
-    # L1/L2 cache pollution on hot paths.
     cpuset: "0"
-    cpu_period: 10000
-    cpu_quota:   2000
     deploy:
       resources:
         limits:
+          cpus: "0.20"
           memory: "8MB"
     depends_on:
       - api1
@@ -56,14 +52,11 @@ services:
     volumes:
       - sock:/run/sock
       - ../data:/data:ro
-    # api1: cores 1,2 — 2 cores allow concurrent requests to spread under
-    # bursts; bandwidth still capped at 40% of 1 CPU. Disjoint from haproxy.
     cpuset: "1,2"
-    cpu_period: 10000
-    cpu_quota:   4000
     deploy:
       resources:
         limits:
+          cpus: "0.40"
           memory: "165MB"
     networks:
       - rinha
@@ -79,15 +72,11 @@ services:
     volumes:
       - sock:/run/sock
       - ../data:/data:ro
-    # api2: cores 2,3 — overlaps with api1 only on core 2. Combined bandwidth
-    # of api1+api2 on core 2 is at most 45%+45% = 90% of 1 core ≤ 1 core, so
-    # no oversubscription; scheduler picks whichever has waiting work.
     cpuset: "2,3"
-    cpu_period: 10000
-    cpu_quota:   4000
     deploy:
       resources:
         limits:
+          cpus: "0.40"
           memory: "165MB"
     networks:
       - rinha
