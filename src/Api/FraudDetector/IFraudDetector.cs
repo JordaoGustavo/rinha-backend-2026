@@ -20,6 +20,8 @@ public interface IFraudDetector : IDisposable
             return KmknnDetector.Open(path);
         if (magic.SequenceEqual("IVFR"u8))
             return IvfDetector.Open(path);
+        if (magic.SequenceEqual("EXCT"u8))
+            return ExactDetector.Open(path);
 
         throw new InvalidDataException($"Unknown index format: {System.Text.Encoding.ASCII.GetString(magic)}");
     }
