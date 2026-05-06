@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO.Pipelines;
 using System.Text;
+using System.Threading;
 using Rinha.Api;
 
 ThreadPool.SetMinThreads(8, 8);
@@ -110,8 +111,25 @@ app.Run(async (HttpContext ctx) =>
     }
 
     var pipeReader = ctx.Request.BodyReader;
-    ReadResult result;
-    if (!pipeReader.TryRead(out result) || result.Buffer.Length < (ctx.Request.ContentLength ?? 1))
+    ReadResult result = default;
+    long needed = ctx.Request.ContentLength ?? 1;
+    bool haveBody = false;
+    // Fast-path: small spin trying TryRead before falling into async wait.
+    // The body almost always arrives within microseconds over a Unix-socket
+    // splice from haproxy; the await would otherwise cost a context switch +
+    // task continuation that shows up as ~1-3ms in the p99.
+    SpinWait spinner = default;
+    for (int attempt = 0; attempt < 8; attempt++)
+    {
+        if (pipeReader.TryRead(out result))
+        {
+            if (result.Buffer.Length >= needed) { haveBody = true; break; }
+            // Partial read; release the buffer back so the next TryRead can resume.
+            pipeReader.AdvanceTo(result.Buffer.Start, result.Buffer.End);
+        }
+        spinner.SpinOnce();
+    }
+    if (!haveBody)
         result = await pipeReader.ReadAtLeastAsync((int)(ctx.Request.ContentLength ?? 512));
 
     var body = result.Buffer;
