@@ -8,6 +8,7 @@ if (args.Length > 0)
     return args[0] switch
     {
         "preprocess" => PreprocessCommand.Run(args[1..]),
+        "accuracy"   => AccuracyCommand.Run(args[1..]),
         _ => throw new ArgumentException($"Unknown command: {args[0]}")
     };
 }

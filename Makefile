@@ -1,4 +1,4 @@
-.PHONY: download-resources preprocess docker-build docker-up docker-down k6 clean
+.PHONY: download-resources preprocess preprocess-exact accuracy docker-build docker-up docker-down k6 clean
 
 ARCH := $(shell uname -m)
 ifeq ($(filter $(ARCH),arm64 aarch64),)
@@ -46,6 +46,18 @@ k6:
 		-e VUS="$(K6_VUS)" \
 		-e DURATION="$(K6_DURATION)" \
 		grafana/k6 run /scripts/bench.js
+
+preprocess-exact: download-resources
+	mkdir -p data
+	dotnet run --project src/Api/Api.csproj -c Release -- \
+		preprocess $(CURDIR)/resources/references.json.gz $(CURDIR)/data/exact.bin 0 0 exact 0
+
+ACC_COUNT ?= 10000
+ACC_SEED  ?= 195842629
+
+accuracy: preprocess preprocess-exact
+	dotnet run --project src/Api/Api.csproj -c Release -- \
+		accuracy $(CURDIR)/data/ivf.bin $(CURDIR)/data/exact.bin $(ACC_COUNT) $(ACC_SEED)
 
 clean:
 	rm -rf out/ data/
