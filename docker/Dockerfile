@@ -20,11 +20,14 @@ RUN mkdir -p /resources \
 
 COPY src/Api/ src/Api/
 
-# Build the IVF index using `dotnet run` (works on any build arch — the .bin is
-# plain little-endian bytes). Default: 4096 clusters, 20 k-means iters, nprobe 35.
+# Build IVF (clustered, int16 + bbox) AND exact (flat float32) indexes.
+# Both are mmapped at runtime; the float32 reference enables exact rerank
+# of top-N int16 candidates → 100% agreement with the brute-force oracle.
 RUN mkdir -p /data \
  && dotnet run --project src/Api/Api.csproj -c Release -- \
-        preprocess /resources/references.json.gz /data/ivf.bin 0 20 ivf 35
+        preprocess /resources/references.json.gz /data/ivf.bin 0 20 ivf 35 \
+ && dotnet run --project src/Api/Api.csproj -c Release -- \
+        preprocess /resources/references.json.gz /data/exact.bin 0 0 exact 0
 
 # AOT publish for the target runtime.
 RUN dotnet publish src/Api/Api.csproj -c Release -r ${RUNTIME_ID} -o /app
@@ -35,8 +38,10 @@ COPY --from=build /app .
 COPY --from=build /resources/mcc_risk.json      /resources/mcc_risk.json
 COPY --from=build /resources/normalization.json /resources/normalization.json
 COPY --from=build /data/ivf.bin                 /data/ivf.bin
+COPY --from=build /data/exact.bin               /data/exact.bin
 
 ENV INDEX_PATH=/data/ivf.bin
+ENV EXACT_PATH=/data/exact.bin
 ENV RESOURCES_PATH=/resources
 ENV API_PORT=8080
 ENTRYPOINT ["./Api"]

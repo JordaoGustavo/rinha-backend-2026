@@ -51,6 +51,7 @@ services:
       - seccomp=unconfined
     environment:
       - INDEX_PATH=${INDEX_PATH:-/data/ivf.bin}
+      - EXACT_PATH=${EXACT_PATH:-/data/exact.bin}
       - SOCKET_PATH=/run/sock/api1.sock
     volumes:
       - sock:/run/sock
@@ -73,6 +74,7 @@ services:
       - seccomp=unconfined
     environment:
       - INDEX_PATH=${INDEX_PATH:-/data/ivf.bin}
+      - EXACT_PATH=${EXACT_PATH:-/data/exact.bin}
       - SOCKET_PATH=/run/sock/api2.sock
     volumes:
       - sock:/run/sock
