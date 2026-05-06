@@ -115,6 +115,17 @@ public sealed unsafe class IvfDetector : IFraudDetector
         long totalSize = IvfBinaryFormat.TotalSize(NumClusters, TotalSlots);
         for (long i = 0; i < totalSize; i += 4096)
             _ = _basePtr[i];
+
+        if (_exactVectors != null)
+        {
+            // Walk the float32 reference data so the first real query doesn't
+            // pay random page-fault cost during the rerank stage.
+            const int pd = IvfBinaryFormat.PaddedDims;
+            long exactBytes = (long)NumVectors * pd * sizeof(float);
+            byte* exactBase = (byte*)_exactVectors;
+            for (long i = 0; i < exactBytes; i += 4096)
+                _ = exactBase[i];
+        }
     }
 
     public (bool Approved, int FraudCount) Score(ReadOnlySpan<float> query)
