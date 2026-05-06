@@ -5,14 +5,14 @@ namespace Rinha.Api;
 public static class IvfBinaryFormat
 {
     public static ReadOnlySpan<byte> Magic => "IVFR"u8;
-    public const uint Version = 6;
+    public const uint Version = 7;
     public const int HeaderSize = 64;
     public const int Dims = 14;
     public const int PaddedDims = 16;
     public const int Scale = 4096;
     public const int BlockVectors = 8;
     public const int BlockBytes = BlockVectors * PaddedDims * sizeof(short);
-    public const int CentroidVectorBytes = PaddedDims * sizeof(float);
+    public const int CentroidVectorBytes = PaddedDims * sizeof(short);
     public const int Int16VectorBytes = PaddedDims * sizeof(short);
 
     [StructLayout(LayoutKind.Sequential, Pack = 1)]
