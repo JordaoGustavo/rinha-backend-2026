@@ -10,7 +10,6 @@ public static class KmknnSearch
         int numClusters = index.NumClusters;
         int actualTop = Math.Min(topClusters, numClusters);
 
-        // Step 1: top clusters by int16 centroid distance
         int* topIdx = stackalloc int[actualTop];
         int* topDist = stackalloc int[actualTop];
         int topSize = 0;
@@ -24,7 +23,6 @@ public static class KmknnSearch
                 HeapReplaceTop(topIdx, topDist, topSize, c, d);
         }
 
-        // Step 2: scan top clusters with int16 distance + early-exit
         int* heapIdx = stackalloc int[k];
         int* heapDist = stackalloc int[k];
         int heapSize = 0;
@@ -32,7 +30,6 @@ public static class KmknnSearch
         for (int p = 0; p < topSize; p++)
             ScanCluster(index, query, topIdx[p], heapIdx, heapDist, ref heapSize, k);
 
-        // Step 3: optional bbox repair (only on full pass)
         if (useBboxRepair && topSize < numClusters)
         {
             int worstDist = heapSize == k ? heapDist[0] : int.MaxValue;
@@ -52,7 +49,6 @@ public static class KmknnSearch
             }
         }
 
-        // Step 4: extract results in ascending distance order
         int resultCount = heapSize;
         for (int i = heapSize - 1; i >= 0; i--)
         {
@@ -99,8 +95,6 @@ public static class KmknnSearch
         }
     }
 
-    // ── Heap for centroid selection (max-heap by distance) ──
-
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static unsafe void HeapPush(int* idx, int* dist, ref int size, int vectorIndex, int d)
     {
@@ -134,8 +128,6 @@ public static class KmknnSearch
             i = largest;
         }
     }
-
-    // ── Heap for KNN result (max-heap by distance) ──
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static unsafe void HeapPushKnn(int* idx, int* dist, ref int size, int vectorIndex, int d)

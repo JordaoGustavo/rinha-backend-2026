@@ -219,8 +219,8 @@ public sealed unsafe class IvfDetector : IFraudDetector
         const int pd = IvfBinaryFormat.PaddedDims;
         const int bv = IvfBinaryFormat.BlockVectors;
         const int blockShorts = pd * bv;
-        const int dimPairs = pd / 2;            // 8
-        const int earlyExitDimPairs = 4;        // first 4 dim-pairs = 8 dims
+        const int dimPairs = pd / 2;
+        const int earlyExitDimPairs = 4;
 
         Span<Vector256<short>> qBroadcast = stackalloc Vector256<short>[dimPairs];
         for (int kp = 0; kp < dimPairs; kp++)
@@ -238,7 +238,6 @@ public sealed unsafe class IvfDetector : IFraudDetector
             int validLanes = count - b * bv;
             if (validLanes > bv) validLanes = bv;
 
-            // Phase 1: partial distance over first 4 dim-pairs (= 8 dims).
             Vector256<int> partial = Vector256<int>.Zero;
             for (int kp = 0; kp < earlyExitDimPairs; kp++)
             {
@@ -293,7 +292,6 @@ public sealed unsafe class IvfDetector : IFraudDetector
         const int blockShorts = pd * bv;
         const int dimPairs = pd / 2;
 
-        // Fallback: scalar gather from block layout. Slow but correct on non-AVX2.
         for (int b = 0; b < numBlocks; b++)
         {
             short* blockPtr = clusterVecBase + b * blockShorts;
@@ -317,8 +315,6 @@ public sealed unsafe class IvfDetector : IFraudDetector
             }
         }
     }
-
-    // ── Heap helpers (max-heap by distance) ──
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void SiftDownProbe(int* list, float* dists, int size, int i)

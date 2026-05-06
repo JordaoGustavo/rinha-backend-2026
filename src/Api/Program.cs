@@ -1,9 +1,6 @@
 using System.IO.Pipelines;
 using Rinha.Api;
 
-// Pre-warm ThreadPool: avoid hill-climb ramp-up on the first sustained burst.
-// Default min-threads = logical-core-count is too low when Kestrel I/O,
-// GC threads, and request handlers compete for cpuset cores.
 ThreadPool.SetMinThreads(8, 8);
 
 if (args.Length > 0)
@@ -31,7 +28,6 @@ Console.WriteLine($"Loaded {detector.NumVectors} vectors, {detector.NumClusters}
 Console.WriteLine("Prefaulting pages...");
 detector.Prefault();
 
-// Warmup: stabilize branch predictor and threadpool. AOT means no JIT to warm.
 const int warmupIterations = 200;
 Console.WriteLine($"Warming up KNN scoring ({warmupIterations} queries)...");
 {
@@ -53,8 +49,6 @@ var builder = WebApplication.CreateSlimBuilder(args);
 builder.Logging.ClearProviders();
 builder.WebHost.ConfigureKestrel(options =>
 {
-    // AddServerHeader: drops 'Server: Kestrel' bytes per response.
-    // MinDataRate=null: kills the 1Hz watchdog timer that fires mid-request behind a LB.
     options.AddServerHeader = false;
     options.Limits.MinRequestBodyDataRate = null;
     options.Limits.MinResponseDataRate = null;
@@ -109,9 +103,6 @@ app.Run(async (HttpContext ctx) =>
     {
         var (approved, fraudCount) = ProcessRequest(detector, body.FirstSpan);
         var responseBody = responses.Get(approved, fraudCount);
-        // ContentLength upfront → Kestrel sends a fixed-length response in one
-        // TCP packet (skips chunked encoding). Sync GetSpan+Advance avoids the
-        // async state machine per request.
         ctx.Response.ContentLength = responseBody.Length;
         ctx.Response.ContentType = "application/json";
         var writer = ctx.Response.BodyWriter;
@@ -121,8 +112,7 @@ app.Run(async (HttpContext ctx) =>
     }
     catch
     {
-        // Per scoring weights (Err=5 vs FN=3), returning a benign 200 is
-        // strictly cheaper than letting an unhandled exception bubble to a 5xx.
+        // FN (weight 3) is cheaper than HTTP 5xx (weight 5); never 5xx.
         var fallback = responses.Get(true, 0);
         ctx.Response.StatusCode = 200;
         ctx.Response.ContentLength = fallback.Length;

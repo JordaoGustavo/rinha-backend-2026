@@ -119,9 +119,6 @@ public static class SimdDistance
         return sum;
     }
 
-    /// <summary>
-    /// Full int16 L2² over 16 dimensions. ~1 AVX2 madd on x86 / 2 NEON wide-mul on ARM.
-    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static unsafe int Int16L2Squared(short* a, short* b)
     {
@@ -173,12 +170,6 @@ public static class SimdDistance
         return total;
     }
 
-    /// <summary>
-    /// Partial int16 L2² over the FIRST 8 dimensions. Used for early-exit pre-filter:
-    /// if partial distance already exceeds the worst K-NN distance, the full 16-dim
-    /// distance is guaranteed to exceed it too (sum of squares is monotonic), so we
-    /// can skip the remaining 8 dims.
-    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static unsafe int Int16L2SquaredFirst8(short* a, short* b)
     {
@@ -209,18 +200,10 @@ public static class SimdDistance
         return total;
     }
 
-    /// <summary>
-    /// Partial int16 L2² over the LAST 8 dimensions (offsets 8..15). Used to complete
-    /// the early-exit pre-filter: full_distance = First8 + Last8.
-    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static unsafe int Int16L2SquaredLast8(short* a, short* b)
         => Int16L2SquaredFirst8(a + 8, b + 8);
 
-    /// <summary>
-    /// Int16 bbox lower bound — sum of squared per-dim gaps to bbox [min, max].
-    /// Returns 0 if query is inside the bbox.
-    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static unsafe int Int16BboxLowerBound(short* query, short* bboxMin, short* bboxMax)
     {

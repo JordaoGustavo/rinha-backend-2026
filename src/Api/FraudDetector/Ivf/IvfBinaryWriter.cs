@@ -10,9 +10,6 @@ public static class IvfBinaryWriter
         const int bv = IvfBinaryFormat.BlockVectors;
         const int scale = IvfBinaryFormat.Scale;
 
-        // Pad each cluster to a multiple of BlockVectors. Padding slots will be zeroed
-        // (vector and label both zero). Padding vectors have distance 0 to a zero query
-        // but are guarded against in the scan loop via `validLanes < 8`.
         var paddedOffsets = new int[k];
         var counts = new int[k];
         int totalSlots = 0;
@@ -24,7 +21,6 @@ public static class IvfBinaryWriter
             totalSlots += blocks * bv;
         }
 
-        // Quantize all vectors into AoS-padded layout (zero-init for padding slots).
         var int16Vectors = new short[(long)totalSlots * pd];
         var paddedLabels = new byte[totalSlots];
         for (int c = 0; c < k; c++)
@@ -42,7 +38,6 @@ public static class IvfBinaryWriter
             }
         }
 
-        // Compute int16 bboxes from valid (non-padding) vectors only.
         var bboxMin = new short[k * pd];
         var bboxMax = new short[k * pd];
         for (int c = 0; c < k; c++)
@@ -76,14 +71,6 @@ public static class IvfBinaryWriter
                 }
         }
 
-        // Transform AoS (already dim-permuted) → AoSoA-block layout for SIMD batched distance.
-        // Per block, dims are stored as 8 dim-pairs (kp = 0..7), each as 2-int16 × bv lanes.
-        // After permutation, dim-pair kp at storage holds INPUT dims (perm[2kp], perm[2kp+1]).
-        // Phase boundaries fall on dim-pair boundaries:
-        //   Phase 1: pairs 0,1   → input dims (5,6)(2,0)
-        //   Phase 2: pairs 2,3   → input dims (7,8)(11,12)
-        //   Phase 3: pairs 4,5   → input dims (9,10)(1,13)
-        //   Phase 4: pairs 6,7   → input dims (3,4)(_,_)
         int totalBlocks = totalSlots / bv;
         var blockedVectors = new short[(long)totalSlots * pd];
         for (int b = 0; b < totalBlocks; b++)
