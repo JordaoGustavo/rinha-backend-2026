@@ -25,17 +25,16 @@ client ───▶ │ haproxy :9999     │ TCP-mode, splice, round-robin
              └──── shared mmap ───┐
                                   ▼
                           /data/ivf.bin
-                          (100MB IVF index)
 ```
 
 Resource budget under the rinha 1-CPU / 350MB limit:
 
 | service | cpuset | CFS quota | memory |
 |--|--|--|--|
-| haproxy | core 0    | 20% (2000/10000) | 10 MB |
-| api1    | cores 1,2 | 40% (4000/10000) | 170 MB |
-| api2    | cores 2,3 | 40% (4000/10000) | 170 MB |
-| **total** | — | **100%** | **350 MB** |
+| haproxy | core 0    | 20% | 8 MB |
+| api1    | cores 1,2 | 40% | 165 MB |
+| api2    | cores 2,3 | 40% | 165 MB |
+| **total** | — | **100%** | **338 MB** |
 
 ## Endpoints
 
@@ -55,38 +54,19 @@ The API never returns a 5xx. On any unexpected parse/IO error the handler falls 
 ## Build & run
 
 ```bash
-# 1. Download the reference dataset (cached in resources/, ~48 MB).
-make download-resources
-
-# 2. Pre-compute the IVF index (runs once, ~140 s on a modern x86).
-make preprocess
-
-# 3. Build the production image (linux/amd64, AOT).
+make preprocess    # downloads references.json.gz (~48 MB) and builds data/ivf.bin (~140s)
 make docker-build
-
-# 4. Bring up haproxy + 2 APIs.
 make docker-up
-
-# 5. Smoke test.
 curl http://localhost:9999/ready
-curl -XPOST http://localhost:9999/fraud-score \
-     -H 'content-type: application/json' \
-     -d @resources/sample-payload.json
 ```
 
-### Local integration test
-
-```bash
-make test-full TEST_DATA=/tmp/test-data.json
-```
-
-Uses `Api test` (in `src/Api/Commands/TestCommand.cs`) to drive a sample dataset against the API, compute false-positive / false-negative / HTTP-error counts, and print the resulting `score_p99 + score_det` exactly as the official engine would.
-
-### Sustained-load benchmark
+## Load test
 
 ```bash
 make k6 K6_VUS=20 K6_DURATION=60s
 ```
+
+Drives a fixed payload at `/fraud-score` from a containerized k6 and prints latency percentiles + throughput.
 
 ## Repository layout
 
@@ -101,16 +81,18 @@ src/Api/
     Kmknn/                   # alternative index (cluster-pruning KNN)
   Commands/
     PreprocessCommand.cs     # builds .bin from references.json.gz
-    TestCommand.cs           # local integration test + scoring
   Preprocessing/
     IvfBuilder.cs            # parallel k-means, int16 quantization
 
 docker/
-  Dockerfile                 # multi-stage, AOT, builds .bin during image build
-  docker-compose.yml         # main compose (mounts ../data for fast dev iteration)
+  Dockerfile                 # multi-stage AOT, builds .bin during image build
+  docker-compose.yml         # haproxy + api1 + api2 (mounts ./data for fast iteration)
   haproxy.cfg                # TCP-mode LB
-scripts/                     # dev tooling: download, k6, smoke tests
-tests/Benchmarks/            # BenchmarkDotNet micro-benchmarks
+scripts/
+  download-resources.sh      # fetches references / mcc_risk / normalization from upstream
+  k6/bench.js                # simple load test
+.github/workflows/
+  publish-image.yml          # builds & pushes ghcr.io/<owner>/rinha-api on push to main
 ```
 
 ## License
