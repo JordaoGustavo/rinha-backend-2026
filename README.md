@@ -160,6 +160,8 @@ A few of the things we discovered the hard way:
 11. **Server-Timing was useful in dev, dangerous in submission.** We added a `Server-Timing: app;dur=…` header to attribute time between LB hops and server compute during k6 load tests. Removed it for submission — the per-request `Stopwatch.GetElapsedTime` + dictionary write was a few hundred nanoseconds we didn't need to spend in the official run.
 12. **A correctness oracle pays for itself.** Building a float32 brute-force `ExactDetector` and an `accuracy` subcommand that diffs IVF vs oracle on synthetic queries took ~150 lines of code. It found the two precision bugs above (adaptive trigger + int16 dequant rerank) within minutes of being wired up — bugs that would have shown as silent score drops in the official run with no actionable signal.
 
+13. **HAProxy in TCP mode is hard to beat with a custom proxy.** We wrote `lb/lb.c` — a minimal C round-robin TCP→UDS proxy using `epoll` + `splice(2)`. It works, but A/B testing against `haproxy:3.1-alpine` showed identical p99 (both bottlenecked by API CFS-quota throttling, not LB CPU) and the custom proxy lost ~10 % throughput. HAProxy 3.1 is so well-tuned (splice-auto, single-thread fast path, batched epoll) that there's no slack for a hand-rolled proxy to find. The C source is kept in `lb/` as documentation of the experiment.
+
 ## Repository layout
 
 ```

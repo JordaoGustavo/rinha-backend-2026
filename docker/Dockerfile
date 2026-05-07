@@ -1,5 +1,9 @@
 # Multi-stage build: download resources + build IVF index + AOT compile API.
 # The image is fully self-contained — running it requires no host volumes.
+# (lb/lb.c is an experimental round-robin TCP→UDS proxy in C. We A/B-tested
+# it against haproxy:3.1-alpine and the custom proxy lost ~10% throughput
+# at identical p99, so we ship haproxy. The C source stays in lb/ for
+# future revisits — see README "Lessons learned".)
 
 FROM mcr.microsoft.com/dotnet/sdk:11.0-preview AS build
 ARG RUNTIME_ID=linux-x64
