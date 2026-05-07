@@ -18,7 +18,7 @@ download-resources:
 preprocess: download-resources
 	mkdir -p data
 	dotnet run --project src/Api/Api.csproj -c Release -- \
-		preprocess $(CURDIR)/resources/references.json.gz $(CURDIR)/data/ivf.bin 0 20 ivf 25
+		preprocess $(CURDIR)/resources/references.json.gz $(CURDIR)/data/ivf.bin 0 20 ivf 8
 
 docker-build:
 	docker build $(PLATFORM_FLAG) --build-arg RUNTIME_ID=$(RUNTIME_ID) \
@@ -58,6 +58,16 @@ k6-varied:
 		-e VUS="$(K6_VUS)" \
 		-e DURATION="$(K6_DURATION)" \
 		grafana/k6 run /scripts/bench-varied.js
+
+k6-official:
+	mkdir -p $(CURDIR)/scripts/k6/official/test
+	docker run --rm --network host \
+		-v $(CURDIR)/scripts/k6/official:/scripts:rw \
+		--user $(shell id -u):$(shell id -g) \
+		--workdir /scripts \
+		grafana/k6 run test.js
+	@echo "--- score ---"
+	@cat $(CURDIR)/scripts/k6/official/test/results.json | jq '{p99, scoring}' 2>/dev/null || true
 
 preprocess-exact: download-resources
 	mkdir -p data
