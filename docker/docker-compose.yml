@@ -1,26 +1,3 @@
-# CFS bandwidth control:
-#   Total CPU budget = 1.0 (0.20 + 0.40 + 0.40) — kept under rinha 1-CPU limit.
-#
-#   We use cpu_period=10000us (10ms) instead of the default 100ms so that
-#   when a container exhausts its quota, the worst-case throttle wait is
-#   ~9ms instead of ~90ms. Same total bandwidth, much shorter P99 tail.
-#
-#   quota / period = bandwidth percentage:
-#     haproxy:  2000 / 10000 = 20%   (matches Jairo's setup; with TCP-mode
-#                                    haproxy this is comfortable headroom)
-#     api1/2:   4000 / 10000 = 40%
-#     total                  = 100% of 1 CPU (rinha limit respected)
-#
-#   The previous 0.10/0.45/0.45 split had haproxy throttling under load
-#   (its 1ms quota was burned in <5ms wall-clock by ~10 concurrent requests
-#   in HTTP mode); shifting CPU to the LB + switching haproxy to TCP mode
-#   eliminates that bottleneck.
-#
-#   NOTE: cpus: and cpu_period/cpu_quota are mutually exclusive in Docker
-#   (NanoCPUs vs explicit cgroup), so the cpus: limit is omitted; the
-#   effective limit is defined by quota/period (verifiable via
-#   `docker exec <container> cat /sys/fs/cgroup/cpu.max`).
-
 services:
   haproxy:
     image: haproxy:3.1-alpine
