@@ -9,3 +9,4 @@ resources/
 data/
 out/
 BenchmarkDotNet.Artifacts/
+scripts/k6/official/
