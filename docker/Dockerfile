@@ -29,7 +29,7 @@ COPY src/Api/ src/Api/
 # of top-N int16 candidates → 100% agreement with the brute-force oracle.
 RUN mkdir -p /data \
  && dotnet run --project src/Api/Api.csproj -c Release -- \
-        preprocess /resources/references.json.gz /data/ivf.bin 0 20 ivf 25 \
+        preprocess /resources/references.json.gz /data/ivf.bin 0 20 ivf 8 \
  && dotnet run --project src/Api/Api.csproj -c Release -- \
         preprocess /resources/references.json.gz /data/exact.bin 0 0 exact 0
 
