@@ -10,6 +10,8 @@
     <IlcMaxVectorTBitWidth Condition="'$(RuntimeIdentifier)' == 'linux-x64'">256</IlcMaxVectorTBitWidth>
     <IlcOptimizationPreference>Speed</IlcOptimizationPreference>
     <OptimizationPreference>Speed</OptimizationPreference>
+    <TieredCompilation>false</TieredCompilation>
+    <PlatformTarget Condition="'$(RuntimeIdentifier)' == 'linux-x64'">x64</PlatformTarget>
     <ServerGarbageCollection>true</ServerGarbageCollection>
     <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
     <DynamicAdaptationMode>0</DynamicAdaptationMode>

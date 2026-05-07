@@ -114,6 +114,12 @@ public sealed unsafe class IvfDetector : IFraudDetector
     public void Prefault()
     {
         long totalSize = IvfBinaryFormat.TotalSize(NumClusters, TotalSlots);
+        // Linux-only mmap hints. Hugepages compress the IVF index (~110 MB,
+        // ~28 k 4 KB pages) into ~55 2 MB pages — fits entirely in the Haswell
+        // L1 dTLB (64 entries). WillNeed kicks readahead before the prefault
+        // touch loop. Both are no-ops on macOS / non-Linux hosts.
+        MmapHints.HintHugePages(_basePtr, totalSize);
+        MmapHints.HintWillNeed(_basePtr, totalSize);
         for (long i = 0; i < totalSize; i += 4096)
             _ = _basePtr[i];
 
@@ -124,6 +130,10 @@ public sealed unsafe class IvfDetector : IFraudDetector
             const int pd = IvfBinaryFormat.PaddedDims;
             long exactBytes = (long)NumVectors * pd * sizeof(float);
             byte* exactBase = (byte*)_exactVectors;
+            // Random access (rerank touches ~6 vectors anywhere in the file
+            // per query). Disable readahead, request hugepages.
+            MmapHints.HintRandom(exactBase, exactBytes);
+            MmapHints.HintHugePages(exactBase, exactBytes);
             for (long i = 0; i < exactBytes; i += 4096)
                 _ = exactBase[i];
         }
@@ -150,7 +160,13 @@ public sealed unsafe class IvfDetector : IFraudDetector
     {
         const int pd = IvfBinaryFormat.PaddedDims;
         const int scale = IvfBinaryFormat.Scale;
-        const int rerankN = 32;
+        // rerankN sweep (10 k synthetic queries, seed=195842629, NPROBE_FULL=5):
+        //   32 → 0.193 ms, 100% agreement (was the prior baseline)
+        //    8 → 0.141 ms, 100% agreement
+        //    7 → 0.135 ms, 100% agreement
+        //    6 → 0.132 ms, 100% agreement (chosen — minimum buffer that holds)
+        //    5 → 0.263 ms, 99.81% (10 FP + 9 FN — no buffer = recall fails)
+        const int rerankN = 6;
 
         short* qInt = stackalloc short[pd];
         for (int d = 0; d < pd; d++)
@@ -206,25 +222,33 @@ public sealed unsafe class IvfDetector : IFraudDetector
                     dist = SimdDistance.EuclideanSquaredPtr(qFloat, candVec);
                 }
 
+                // Insertion sort ascending by distance — at k=5 this beats
+                // max-heap (no log2 sift, no swap-tuple). Worst-K threshold
+                // = topDist[k-1].
                 if (topSize < 5)
                 {
-                    int p = topSize++;
-                    topIdx[p] = vecIdx; topDist[p] = dist;
-                    int j = p;
-                    while (j > 0)
+                    int p = topSize - 1;
+                    while (p >= 0 && topDist[p] > dist)
                     {
-                        int parent = (j - 1) >> 1;
-                        if (topDist[parent] >= topDist[j]) break;
-                        (topIdx[parent], topIdx[j]) = (topIdx[j], topIdx[parent]);
-                        (topDist[parent], topDist[j]) = (topDist[j], topDist[parent]);
-                        j = parent;
+                        topDist[p + 1] = topDist[p];
+                        topIdx[p + 1]  = topIdx[p];
+                        p--;
                     }
+                    topDist[p + 1] = dist;
+                    topIdx[p + 1]  = vecIdx;
+                    topSize++;
                 }
-                else if (dist < topDist[0])
+                else if (dist < topDist[4])
                 {
-                    topIdx[0] = vecIdx;
-                    topDist[0] = dist;
-                    SiftDownFloat(topIdx, topDist, 5, 0);
+                    int p = 3;
+                    while (p >= 0 && topDist[p] > dist)
+                    {
+                        topDist[p + 1] = topDist[p];
+                        topIdx[p + 1]  = topIdx[p];
+                        p--;
+                    }
+                    topDist[p + 1] = dist;
+                    topIdx[p + 1]  = vecIdx;
                 }
             }
 
@@ -484,21 +508,6 @@ public sealed unsafe class IvfDetector : IFraudDetector
             short s1 = blockPtr[kp * laneStride + laneId * 2 + 1];
             dest[2 * kp]     = s0 * invScale;
             dest[2 * kp + 1] = s1 * invScale;
-        }
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void SiftDownFloat(Span<int> idx, Span<float> dist, int size, int i)
-    {
-        while (true)
-        {
-            int largest = i, l = 2 * i + 1, r = 2 * i + 2;
-            if (l < size && dist[l] > dist[largest]) largest = l;
-            if (r < size && dist[r] > dist[largest]) largest = r;
-            if (largest == i) break;
-            (idx[largest], idx[i]) = (idx[i], idx[largest]);
-            (dist[largest], dist[i]) = (dist[i], dist[largest]);
-            i = largest;
         }
     }
 
