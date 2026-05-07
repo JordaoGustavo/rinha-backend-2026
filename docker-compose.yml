@@ -20,7 +20,12 @@ services:
       resources:
         limits:
           cpus: "0.20"
-          memory: "8MB"
+          # Bumped 8 MB → 16 MB after the previous submission run hit 5
+          # http_errors (~0.01 % failure, –180 detection pts). Hypothesis:
+          # 8 MB was tight under burst with maxconn 20 000. Trimmed each
+          # API 165 → 162 MB to stay under the 350 MB total budget
+          # (16 + 162 + 162 = 340, 10 MB headroom).
+          memory: "16MB"
     depends_on:
       - api1
       - api2
@@ -31,6 +36,11 @@ services:
     image: ghcr.io/jordaogustavo/rinha-api:latest
     environment:
       - SOCKET_PATH=/run/sock/api1.sock
+      # nprobe sweep (10 k synthetic queries, NPROBE_FULL=5):
+      # 100% accuracy at nprobe ∈ [3, 8]; 5 is the latency floor (0.138 ms
+      # vs 0.193 at the binary default 35). Stage-1 cluster scan does
+      # ~5 × ~750 vec; bbox-repair sweeps the rest with lb-skip.
+      - NPROBE_FULL=5
     volumes:
       - sock:/run/sock
     cpuset: "1,2"
@@ -38,7 +48,7 @@ services:
       resources:
         limits:
           cpus: "0.40"
-          memory: "165MB"
+          memory: "162MB"
     networks:
       - rinha
 
@@ -46,6 +56,7 @@ services:
     image: ghcr.io/jordaogustavo/rinha-api:latest
     environment:
       - SOCKET_PATH=/run/sock/api2.sock
+      - NPROBE_FULL=5
     volumes:
       - sock:/run/sock
     cpuset: "2,3"
@@ -53,7 +64,7 @@ services:
       resources:
         limits:
           cpus: "0.40"
-          memory: "165MB"
+          memory: "162MB"
     networks:
       - rinha
 
