@@ -1,10 +1,12 @@
 using System.Diagnostics;
 using System.IO.Pipelines;
 using System.Text;
-using System.Threading;
 using Rinha.Api;
 
-ThreadPool.SetMinThreads(8, 8);
+// SetMinThreads(8, 8) was tested and removed: at the API's 0.4 effective
+// CPU under CFS quota, 8 ready workers serialize behind a single timeslice.
+// CFS arbitrarily picks one — often not the one that received the wakeup
+// byte — and the cross-worker handoff drops into p99 as 1–3 ms tail.
 
 bool serverTimingEnabled = Environment.GetEnvironmentVariable("SERVER_TIMING") == "1";
 
