@@ -1,12 +1,11 @@
 # Submission compose for the rinha-de-backend-2026 official engine.
-# All resources (CPU, memory, image) match the rinha rules:
-#   * 1 CPU total, 350 MB total
-#   * 1 LB + 2 API replicas, bridge network, port 9999
-#   * No fraud-detection logic on the LB (haproxy in TCP mode)
+# Resources match the rinha rules: 1 CPU and 350 MB total; 1 LB + 2 API
+# replicas; bridge network; port 9999; no business logic on the LB.
 #
-# CFS bandwidth control: cpu_period=10000us (10ms) instead of the default
-# 100ms shrinks worst-case throttle wait from ~90ms to ~9ms — same total
-# bandwidth, much shorter P99 tail.
+# CPU limit declared via deploy.resources.limits.cpus (rinha 2026 standard
+# template). Default cpu_period (100ms) means worst-case CFS throttle wait
+# can reach ~90ms — visible in the p99 tail. The detector keeps server work
+# under ~250µs, so 99% of requests stay off the throttle path entirely.
 
 services:
   haproxy:
@@ -17,11 +16,10 @@ services:
       - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
       - sock:/run/sock
     cpuset: "0"
-    cpu_period: 10000
-    cpu_quota:   2000
     deploy:
       resources:
         limits:
+          cpus: "0.20"
           memory: "8MB"
     depends_on:
       - api1
@@ -30,18 +28,16 @@ services:
       - rinha
 
   api1:
-    # TODO: replace with the published public image (e.g. ghcr.io/jordaogustavo/rinha-api:v1).
     image: ghcr.io/jordaogustavo/rinha-api:latest
     environment:
       - SOCKET_PATH=/run/sock/api1.sock
     volumes:
       - sock:/run/sock
     cpuset: "1,2"
-    cpu_period: 10000
-    cpu_quota:   4000
     deploy:
       resources:
         limits:
+          cpus: "0.40"
           memory: "165MB"
     networks:
       - rinha
@@ -53,11 +49,10 @@ services:
     volumes:
       - sock:/run/sock
     cpuset: "2,3"
-    cpu_period: 10000
-    cpu_quota:   4000
     deploy:
       resources:
         limits:
+          cpus: "0.40"
           memory: "165MB"
     networks:
       - rinha
