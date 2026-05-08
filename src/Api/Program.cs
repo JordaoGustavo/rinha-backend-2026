@@ -60,6 +60,21 @@ Console.WriteLine($"Warming up KNN scoring ({warmupIterations} queries)...");
 }
 Console.WriteLine("Ready.");
 
+// Bypass total do Kestrel quando CUSTOM_HTTP=1: SocketHttpServer raw HTTP/1.1
+// sobre o mesmo Unix socket. Pré-construído (origin/perf/custom-http-server,
+// commit 5c187ca). Compatível com sno-forevis (LB Rust+mio epoll, sem
+// parsing HTTP — verificado: strings -i não acha "http"/"GET"/"POST" no
+// binário /proxy v0.0.2).
+bool customHttp = Environment.GetEnvironmentVariable("CUSTOM_HTTP") == "1";
+if (customHttp && !string.IsNullOrEmpty(socketPath))
+{
+    Console.WriteLine($"Custom HTTP server (Kestrel bypass) on {socketPath}");
+    var customResponses = HttpResponseTable.Build();
+    using var server = new SocketHttpServer(socketPath, detector, customResponses);
+    await server.RunAsync();
+    return 0;
+}
+
 var responses = ResponseCache.Build();
 
 var builder = WebApplication.CreateSlimBuilder(args);
