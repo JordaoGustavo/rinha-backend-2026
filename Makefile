@@ -1,4 +1,4 @@
-.PHONY: download-resources preprocess preprocess-exact accuracy docker-build docker-build-dev docker-up docker-down k6 k6-varied clean
+.PHONY: download-resources download-k6-official preprocess preprocess-exact accuracy docker-build docker-build-dev docker-up docker-down k6 k6-varied k6-official clean
 
 ARCH := $(shell uname -m)
 ifeq ($(filter $(ARCH),arm64 aarch64),)
@@ -14,6 +14,9 @@ IMAGE   := rinha/api:latest
 
 download-resources:
 	./scripts/download-resources.sh
+
+download-k6-official:
+	./scripts/download-k6-official.sh
 
 preprocess: download-resources
 	mkdir -p data
@@ -59,15 +62,13 @@ k6-varied:
 		-e DURATION="$(K6_DURATION)" \
 		grafana/k6 run /scripts/bench-varied.js
 
-k6-official:
-	mkdir -p $(CURDIR)/scripts/k6/official/test
+k6-official: download-k6-official
 	docker run --rm --network host \
-		-v $(CURDIR)/scripts/k6/official:/scripts:rw \
-		--user $(shell id -u):$(shell id -g) \
-		--workdir /scripts \
-		grafana/k6 run test.js
+		-v $(CURDIR)/scripts/k6-official:/work:rw \
+		-w /work \
+		grafana/k6 run test/test.js
 	@echo "--- score ---"
-	@cat $(CURDIR)/scripts/k6/official/test/results.json | jq '{p99, scoring}' 2>/dev/null || true
+	@cat $(CURDIR)/scripts/k6-official/test/results.json | jq '{p99, scoring}' 2>/dev/null || true
 
 preprocess-exact: download-resources
 	mkdir -p data
