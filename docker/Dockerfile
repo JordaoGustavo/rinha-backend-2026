@@ -33,16 +33,23 @@ RUN mkdir -p /data \
  && dotnet run --project src/Api/Api.csproj -c Release -- \
         preprocess /resources/references.json.gz /data/exact.bin 0 0 exact 0
 
+# Warmup payloads (200 NDJSON variados) — substitui o random uniform do
+# warmup loop, calibrando branch predictor/TLB/icache pra distribuição
+# realista. Gera durante o build pra caber a static no container final.
+RUN dotnet run --project src/Api/Api.csproj -c Release -- \
+        gen-warmup /resources/warmup-payloads.ndjson 200
+
 # AOT publish for the target runtime.
 RUN dotnet publish src/Api/Api.csproj -c Release -r ${RUNTIME_ID} -o /app
 
 FROM mcr.microsoft.com/dotnet/runtime-deps:11.0-preview
 WORKDIR /app
 COPY --from=build /app .
-COPY --from=build /resources/mcc_risk.json      /resources/mcc_risk.json
-COPY --from=build /resources/normalization.json /resources/normalization.json
-COPY --from=build /data/ivf.bin                 /data/ivf.bin
-COPY --from=build /data/exact.bin               /data/exact.bin
+COPY --from=build /resources/mcc_risk.json           /resources/mcc_risk.json
+COPY --from=build /resources/normalization.json      /resources/normalization.json
+COPY --from=build /resources/warmup-payloads.ndjson  /resources/warmup-payloads.ndjson
+COPY --from=build /data/ivf.bin                      /data/ivf.bin
+COPY --from=build /data/exact.bin                    /data/exact.bin
 
 ENV INDEX_PATH=/data/ivf.bin
 ENV EXACT_PATH=/data/exact.bin
