@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO.MemoryMappedFiles;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
@@ -285,6 +286,16 @@ public sealed unsafe class IvfDetector : IFraudDetector
 
         for (int c = 0; c < numClusters; c++)
         {
+            // Prefetch o centroide c+8 — cada centroide = 32 B (16 shorts) =
+            // ½ cache line. Distância 8 = 256 B = 4 linhas adiantadas.
+            // Haswell L2 latency ~12 ciclos, DRAM ~200 ciclos; com
+            // Int16L2Squared ~16 ciclos/iter, 4 linhas à frente cobre
+            // ~50 ciclos de antecipação — boa margem sem inundar a fila
+            // de prefetch. (A/B local não confiável no Mac mini do dev;
+            // próxima rodada oficial pode validar contra c+4/c+12.)
+            if (c + 8 < numClusters)
+                SimdDistance.Prefetch(_centroids + (c + 8) * pd);
+
             int dist = SimdDistance.Int16L2Squared(qInt, _centroids + c * pd);
 
             if (probeCount < actualNprobe)
