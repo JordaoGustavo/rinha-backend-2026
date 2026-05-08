@@ -75,8 +75,12 @@ public static class IvfBuilder
         }
 
         // Sort vectors within each cluster by L2 distance to centroid.
-        // Closer vectors appear first, improving early-exit rates in
-        // ScanCluster (the partial-sum threshold triggers sooner).
+        // A/B com cluster sort desligado (Mac local k6-varied 30s, n=1):
+        //   p99 s1-bbox  com sort = 842 µs   /  sem sort = 1170 µs (+328)
+        //   p99 score    com sort = 1700 µs  /  sem sort = 2010 µs (+310)
+        // Confirmado: vetores próximos ao centroide primeiro derruba o
+        // early-exit threshold do partial-sum cedo, e o ganho na cabeça
+        // do cluster supera o custo na cauda.
         for (int c = 0; c < numClusters; c++)
         {
             int off = clusterOffsets[c];
