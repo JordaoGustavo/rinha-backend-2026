@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Text;
 
 namespace Rinha.Api;
@@ -40,6 +41,7 @@ public sealed class HttpResponseTable
         return table;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public byte[] Get(bool approved, int fraudCount)
     {
         if ((uint)fraudCount > 5) fraudCount = 0;
