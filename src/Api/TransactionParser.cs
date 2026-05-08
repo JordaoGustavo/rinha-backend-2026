@@ -263,10 +263,15 @@ public static class TransactionParser
             }
         }
 
-        var txRequestedAt   = new DateTime(txYear, txMonth, txDay, txHour, txMinute, txSecond, DateTimeKind.Utc);
-        var lastTxTimestamp = hasLastTx
-            ? new DateTime(lastYear, lastMonth, lastDay, lastHour, lastMinute, lastSecond, DateTimeKind.Utc)
-            : default;
+        // Day-of-week via Zeller's congruence (gregoriano) — evita
+        // alocação de DateTime + lookup de DayOfWeek (~50–80 ns vs ~5 ns).
+        // Equivalência verificada em TransactionParserTests para 2024..2027.
+        int zZ, zC, zM;
+        if (txMonth < 3) { zZ = (txYear - 1) % 100; zC = (txYear - 1) / 100; zM = txMonth + 12; }
+        else             { zZ = txYear       % 100; zC = txYear       / 100; zM = txMonth;       }
+        int zH = (txDay + 13 * (zM + 1) / 5 + zZ + zZ / 4 + zC / 4 + 5 * zC) % 7;
+        // zH: 0=Sat, 1=Sun, 2=Mon, ..., 6=Fri. Mon-based 0..6 = (zH+5) % 7.
+        int monBased = (zH + 5) % 7;
 
         vector[0] = (float)Math.Round(ClampD(txAmount / _maxAmount), 4);
         vector[1] = (float)Math.Round(ClampD(txInstallments / _maxInstallments), 4);
@@ -274,14 +279,28 @@ public static class TransactionParser
             ? 1.0f
             : (float)Math.Round(ClampD((txAmount / custAvgAmount) / _amountVsAvgRatio), 4);
         vector[3] = (float)Math.Round(txHour / 23.0, 4);
-
-        DayOfWeek dow = txRequestedAt.DayOfWeek;
-        int monBased = dow == DayOfWeek.Sunday ? 6 : (int)dow - 1;
         vector[4] = (float)Math.Round(monBased / 6.0, 4);
 
         if (hasLastTx)
         {
-            double minutes = (txRequestedAt - lastTxTimestamp).TotalMinutes;
+            // Aritmética escalar quando mesmo mês/ano (caso comum no rinha 2026
+            // que tem last_tx geralmente <24h antes). Fallback para DateTime
+            // só em cross-month/year.
+            double minutes;
+            if (txYear == lastYear && txMonth == lastMonth)
+            {
+                long deltaSec = ((long)(txDay    - lastDay))    * 86400L
+                              + ((long)(txHour   - lastHour))   * 3600L
+                              + ((long)(txMinute - lastMinute)) * 60L
+                              +  (long)(txSecond - lastSecond);
+                minutes = deltaSec / 60.0;
+            }
+            else
+            {
+                var a = new DateTime(txYear,   txMonth,   txDay,   txHour,   txMinute,   txSecond,   DateTimeKind.Utc);
+                var b = new DateTime(lastYear, lastMonth, lastDay, lastHour, lastMinute, lastSecond, DateTimeKind.Utc);
+                minutes = (a - b).TotalMinutes;
+            }
             vector[5] = (float)Math.Round(ClampD(minutes / _maxMinutes), 4);
             vector[6] = (float)Math.Round(ClampD(lastTxKmFromCurrent / _maxKm), 4);
         }
