@@ -14,8 +14,9 @@ if (args.Length > 0)
 {
     return args[0] switch
     {
-        "preprocess" => PreprocessCommand.Run(args[1..]),
-        "accuracy"   => AccuracyCommand.Run(args[1..]),
+        "preprocess"  => PreprocessCommand.Run(args[1..]),
+        "accuracy"    => AccuracyCommand.Run(args[1..]),
+        "gen-warmup"  => GenWarmupCommand.Run(args[1..]),
         _ => throw new ArgumentException($"Unknown command: {args[0]}")
     };
 }
@@ -45,20 +46,63 @@ Console.WriteLine($"Loaded {detector.NumVectors} vectors, {detector.NumClusters}
 Console.WriteLine("Prefaulting pages...");
 detector.Prefault();
 
+// Warmup com payloads reais (variados em amount/mcc/km/flags) em vez de
+// vetores random uniformes. Calibra branch predictor/TLB/icache pra
+// distribuição realista do tráfego do bench oficial. Fallback para o
+// caminho random se o arquivo não estiver disponível.
 const int warmupIterations = 200;
-Console.WriteLine($"Warming up KNN scoring ({warmupIterations} queries)...");
 {
+    var warmupPath = Path.Combine(resourcesPath, "warmup-payloads.ndjson");
     Span<float> warmVec = stackalloc float[16];
-    var rng = new Random(42);
-    for (int i = 0; i < warmupIterations; i++)
+    int warmedReal = 0;
+    if (File.Exists(warmupPath))
     {
-        warmVec.Clear();
-        for (int d = 0; d < 14; d++)
-            warmVec[d] = (float)rng.NextDouble();
-        _ = detector.Score(warmVec);
+        Console.WriteLine($"Warming up KNN scoring with real payloads from {warmupPath}...");
+        foreach (var line in File.ReadLines(warmupPath))
+        {
+            if (warmedReal >= warmupIterations) break;
+            if (line.Length < 4) continue;
+            warmVec.Clear();
+            try
+            {
+                TransactionParser.Parse(System.Text.Encoding.UTF8.GetBytes(line), warmVec);
+                _ = detector.Score(warmVec);
+                warmedReal++;
+            }
+            catch { /* skip malformed line */ }
+        }
+        Console.WriteLine($"  warmed up with {warmedReal} real payloads.");
+    }
+    if (warmedReal < warmupIterations)
+    {
+        // Fallback / complemento: vetores random pra fechar warmupIterations
+        Console.WriteLine($"  filling remaining {warmupIterations - warmedReal} with random vectors");
+        var rng = new Random(42);
+        for (int i = warmedReal; i < warmupIterations; i++)
+        {
+            warmVec.Clear();
+            for (int d = 0; d < 14; d++)
+                warmVec[d] = (float)rng.NextDouble();
+            _ = detector.Score(warmVec);
+        }
     }
 }
 Console.WriteLine("Ready.");
+
+// Bypass total do Kestrel quando CUSTOM_HTTP=1: SocketHttpServer raw HTTP/1.1
+// sobre o mesmo Unix socket. Pré-construído (origin/perf/custom-http-server,
+// commit 5c187ca). Compatível com sno-forevis (LB Rust+mio epoll, sem
+// parsing HTTP — verificado: strings -i não acha "http"/"GET"/"POST" no
+// binário /proxy v0.0.2).
+bool customHttp = Environment.GetEnvironmentVariable("CUSTOM_HTTP") == "1";
+if (customHttp && !string.IsNullOrEmpty(socketPath))
+{
+    Console.WriteLine($"Custom HTTP server (Kestrel bypass) on {socketPath}");
+    var customResponses = HttpResponseTable.Build();
+    using var server = new SocketHttpServer(socketPath, detector, customResponses);
+    await server.RunAsync();
+    return 0;
+}
 
 var responses = ResponseCache.Build();
 

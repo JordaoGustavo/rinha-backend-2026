@@ -1,0 +1,27 @@
+{
+  "id": "golden-tx-1",
+  "transaction": {
+    "amount": 250.00,
+    "installments": 1,
+    "requested_at": "2026-04-15T13:42:11Z"
+  },
+  "customer": {
+    "avg_amount": 180.00,
+    "tx_count_24h": 3,
+    "known_merchants": ["m-001", "m-002"]
+  },
+  "merchant": {
+    "id": "m-001",
+    "mcc": "5411",
+    "avg_amount": 200.00
+  },
+  "terminal": {
+    "is_online": true,
+    "card_present": true,
+    "km_from_home": 2.5
+  },
+  "last_transaction": {
+    "timestamp": "2026-04-15T11:10:00Z",
+    "km_from_current": 1.8
+  }
+}
