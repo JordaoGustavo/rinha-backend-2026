@@ -32,6 +32,13 @@ public sealed unsafe class IvfDetector : IFraudDetector
     public int NprobeFull { get; }
     public string Description => $"IVF v7 SoA-block {NumClusters} clusters, int16 centroids+vectors + f32-rerank, nprobe={NprobeFull}";
 
+    /// <summary>
+    /// Counter usado em testes/diagnóstico. Incrementado cada vez que
+    /// o bbox-repair pass-2 é executado. Em produção, com queries
+    /// não-borderline, fica abaixo do total de queries.
+    /// </summary>
+    public static int Pass2InvocationsForTest;
+
     private IvfDetector(MemoryMappedFile mmf, MemoryMappedViewAccessor accessor, byte* basePtr,
         int numVectors, int numClusters, int totalSlots, int nprobeFast, int nprobeFull,
         MemoryMappedFile? exactMmf = null, MemoryMappedViewAccessor? exactAccessor = null, float* exactVectors = null)
@@ -329,6 +336,17 @@ public sealed unsafe class IvfDetector : IFraudDetector
 
         if (useBboxRepair && probeCount < numClusters)
         {
+            // Tentativa de conditional bbox-repair (zan trick) revertida em
+            // 2026-05-08: com NPROBE_FULL=5 a pass-1 amostra apenas 5 dos
+            // 4096 clusters; em queries random, a sample não-representativa
+            // produz p1Fraud=0 ou p1Fraud=5,6 mesmo quando o oracle discorda.
+            // Faixa borderline {1,2,3,4} produziu 73 mismatches em 10k
+            // queries (0.73%), quebrando o requisito de 100% acurácia.
+            // O atalho exigiria NPROBE_FULL=20+ pra ter margem de pass-1.
+            // Mantida pass-2 incondicional. Pass2InvocationsForTest hoje
+            // sempre = total de queries.
+            Pass2InvocationsForTest++;
+
             // Bitset of already-scanned clusters: O(1) test vs O(probeCount) linear walk.
             int bitsetWords = (numClusters + 63) >> 6;
             ulong* scannedBits = stackalloc ulong[bitsetWords];
