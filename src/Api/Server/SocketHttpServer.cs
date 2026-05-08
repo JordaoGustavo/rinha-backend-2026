@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
+using System.Threading;
 
 namespace Rinha.Api;
 
@@ -43,9 +44,16 @@ public sealed class SocketHttpServer : IDisposable
             try { client = await _listener.AcceptAsync(_cts.Token); }
             catch (OperationCanceledException) { break; }
 
-            // One Task per connection. HAProxy in tcp mode + tcpka keeps long
-            // connections, so spawn cost amortizes across many requests.
-            _ = Task.Run(() => HandleConnectionAsync(client));
+            // ThreadPool.UnsafeQueueUserWorkItem em vez de Task.Run: evita
+            // alocação de Task object + state machine por conexão. Sob 100
+            // VUs com keepalive (k6 oficial) isso elimina dezenas de
+            // alocações/seg que pressionavam o GC e geravam contention de
+            // ThreadPool. Visto no daniloitagyba/rinha-2026-dotnet
+            // (SERVER_MODE=raw → UnsafeQueueUserWorkItem).
+            ThreadPool.UnsafeQueueUserWorkItem(
+                static s => _ = s.server.HandleConnectionAsync(s.client),
+                (server: this, client),
+                preferLocal: false);
         }
     }
 
