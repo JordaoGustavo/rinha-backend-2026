@@ -145,6 +145,33 @@ public class TransactionParserTests
     }
 
     [Fact]
+    public void Parse_GenWarmupPayload_DoesNotThrow_AndProducesValidVector()
+    {
+        // Smoke: payloads gerados pelo GenWarmupCommand têm que ser
+        // parseaveis pelo TransactionParser (mesmo formato do bench-varied).
+        EnsureInitialized();
+
+        // Linha de payload típica do gen-warmup (NDJSON, sem BOM).
+        var line = "{\"id\":\"warm-tx-1\",\"transaction\":{\"amount\":250.00," +
+                   "\"installments\":1,\"requested_at\":\"2026-04-15T13:42:11Z\"}," +
+                   "\"customer\":{\"avg_amount\":180.00,\"tx_count_24h\":3," +
+                   "\"known_merchants\":[\"m-001\",\"m-002\"]}," +
+                   "\"merchant\":{\"id\":\"m-001\",\"mcc\":\"5411\",\"avg_amount\":200.00}," +
+                   "\"terminal\":{\"is_online\":true,\"card_present\":true,\"km_from_home\":2.50}," +
+                   "\"last_transaction\":{\"timestamp\":\"2026-04-15T11:10:00Z\",\"km_from_current\":1.80}}";
+        var bytes = System.Text.Encoding.UTF8.GetBytes(line);
+
+        Span<float> vec = stackalloc float[16];
+        TransactionParser.Parse(bytes, vec);
+
+        // Pelo menos a primeira dimensão (amount/maxAmount) tem que ser sensata
+        Assert.True(vec[0] > 0f && vec[0] <= 1f, $"vec[0]={vec[0]} fora de [0,1]");
+        // E o flag de online/card_present (dims 9 e 10) tem que ser 1.0
+        Assert.Equal(1f, vec[9]);
+        Assert.Equal(1f, vec[10]);
+    }
+
+    [Fact]
     public void EscalarMinutes_MatchesDateTimeSubtract_SameMonth()
     {
         // Pra qualquer par de timestamps no mesmo mês/ano, a aritmética
