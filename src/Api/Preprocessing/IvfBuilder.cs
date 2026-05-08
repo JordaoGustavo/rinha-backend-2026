@@ -74,6 +74,49 @@ public static class IvfBuilder
             originalIndices[destIdx] = i;
         }
 
+        // Sort vectors within each cluster by L2 distance to centroid.
+        // Closer vectors appear first, improving early-exit rates in
+        // ScanCluster (the partial-sum threshold triggers sooner).
+        for (int c = 0; c < numClusters; c++)
+        {
+            int off = clusterOffsets[c];
+            int cnt = clusterCounts[c];
+            if (cnt <= 1) continue;
+
+            var order = new int[cnt];
+            var distArr = new float[cnt];
+            int cOff = c * pd;
+            for (int i = 0; i < cnt; i++)
+            {
+                order[i] = i;
+                int vOff = (off + i) * pd;
+                float d = 0;
+                for (int dim = 0; dim < 14; dim++)
+                {
+                    float diff = outVectors[vOff + dim] - centroids[cOff + dim];
+                    d += diff * diff;
+                }
+                distArr[i] = d;
+            }
+
+            Array.Sort(distArr, order);
+
+            var tmpVec = new float[cnt * pd];
+            var tmpLbl = new byte[cnt];
+            var tmpOrig = new int[cnt];
+            for (int i = 0; i < cnt; i++)
+            {
+                int src = off + order[i];
+                Array.Copy(outVectors, src * pd, tmpVec, i * pd, pd);
+                tmpLbl[i] = outLabels[src];
+                tmpOrig[i] = originalIndices[src];
+            }
+            Array.Copy(tmpVec, 0, outVectors, off * pd, cnt * pd);
+            Array.Copy(tmpLbl, 0, outLabels, off, cnt);
+            Array.Copy(tmpOrig, 0, originalIndices, off, cnt);
+        }
+        Console.WriteLine("  Sorted vectors by centroid distance within each cluster.");
+
         return new IvfResult
         {
             Centroids = centroids,
