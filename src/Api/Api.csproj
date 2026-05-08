@@ -6,10 +6,11 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <PublishAot>true</PublishAot>
     <InvariantGlobalization>true</InvariantGlobalization>
-    <!-- Haswell ULT (i5-4278U) tem AVX2 + BMI2 + FMA3 + POPCNT. Declarar
-         explícitos dá ao compilador NativeAOT mais liberdade pra inlinear
-         intrinsics em código frio sem checks de Avx2.IsSupported. -->
-    <IlcInstructionSet Condition="'$(RuntimeIdentifier)' == 'linux-x64'">avx2,bmi,bmi2,fma,lzcnt,popcnt</IlcInstructionSet>
+    <!-- Só "avx2" é aceito pelo ILC v11 preview (`bmi`, `bmi2`, etc são
+         "Unrecognized instruction set"). avx2 baseline já implica
+         BMI1/BMI2/FMA3/POPCNT/LZCNT em CPUs Haswell+, que é o que o
+         tester oficial usa (i5-4278U / Mac mini Late 2014). -->
+    <IlcInstructionSet Condition="'$(RuntimeIdentifier)' == 'linux-x64'">avx2</IlcInstructionSet>
     <IlcMaxVectorTBitWidth Condition="'$(RuntimeIdentifier)' == 'linux-x64'">256</IlcMaxVectorTBitWidth>
     <IlcOptimizationPreference>Speed</IlcOptimizationPreference>
     <IlcFoldIdenticalMethodBodies>true</IlcFoldIdenticalMethodBodies>
