@@ -10,3 +10,4 @@ data/
 out/
 BenchmarkDotNet.Artifacts/
 scripts/k6/official/
+scripts/k6-official/

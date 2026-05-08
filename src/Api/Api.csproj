@@ -6,9 +6,13 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <PublishAot>true</PublishAot>
     <InvariantGlobalization>true</InvariantGlobalization>
-    <IlcInstructionSet Condition="'$(RuntimeIdentifier)' == 'linux-x64'">avx2</IlcInstructionSet>
+    <!-- Haswell ULT (i5-4278U) tem AVX2 + BMI2 + FMA3 + POPCNT. Declarar
+         explícitos dá ao compilador NativeAOT mais liberdade pra inlinear
+         intrinsics em código frio sem checks de Avx2.IsSupported. -->
+    <IlcInstructionSet Condition="'$(RuntimeIdentifier)' == 'linux-x64'">avx2,bmi,bmi2,fma,lzcnt,popcnt</IlcInstructionSet>
     <IlcMaxVectorTBitWidth Condition="'$(RuntimeIdentifier)' == 'linux-x64'">256</IlcMaxVectorTBitWidth>
     <IlcOptimizationPreference>Speed</IlcOptimizationPreference>
+    <IlcFoldIdenticalMethodBodies>true</IlcFoldIdenticalMethodBodies>
     <OptimizationPreference>Speed</OptimizationPreference>
     <TieredCompilation>false</TieredCompilation>
     <PlatformTarget Condition="'$(RuntimeIdentifier)' == 'linux-x64'">x64</PlatformTarget>
