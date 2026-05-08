@@ -1,6 +1,8 @@
 using System.Buffers;
+using System.Diagnostics;
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Threading;
 
 namespace Rinha.Api;
@@ -21,11 +23,14 @@ public sealed class SocketHttpServer : IDisposable
     private readonly IFraudDetector _detector;
     private readonly HttpResponseTable _responses;
     private readonly CancellationTokenSource _cts = new();
+    private readonly bool _serverTimingEnabled;
+    private static readonly double TickToUs = 1_000_000.0 / Stopwatch.Frequency;
 
     public SocketHttpServer(string socketPath, IFraudDetector detector, HttpResponseTable responses, int backlog = 2048)
     {
         _detector = detector;
         _responses = responses;
+        _serverTimingEnabled = Environment.GetEnvironmentVariable("SERVER_TIMING") == "1";
         if (File.Exists(socketPath)) File.Delete(socketPath);
         _listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
         _listener.Bind(new UnixDomainSocketEndPoint(socketPath));
@@ -141,9 +146,16 @@ public sealed class SocketHttpServer : IDisposable
         vec.Clear();
         try
         {
-            TransactionParser.Parse(body, vec);
-            var (approved, fraudCount) = _detector.Score(vec);
-            SendAll(client, _responses.Get(approved, fraudCount));
+            if (_serverTimingEnabled && _detector is IvfDetector ivfDet)
+            {
+                ProcessWithTiming(client, ivfDet, body);
+            }
+            else
+            {
+                TransactionParser.Parse(body, vec);
+                var (approved, fraudCount) = _detector.Score(vec);
+                SendAll(client, _responses.Get(approved, fraudCount));
+            }
         }
         catch
         {
@@ -151,6 +163,52 @@ public sealed class SocketHttpServer : IDisposable
             SendAll(client, _responses.Get(true, 0));
         }
         return bodyStart + cl;
+    }
+
+    /// <summary>
+    /// Path opt-in (SERVER_TIMING=1) que emite header `Server-Timing` com
+    /// quebra por estágio (parse, s1-cent, s1-scan, s1-bbox, s2-rerank,
+    /// total). Construído dinamicamente — não usa o LUT pré-pronto.
+    /// `scripts/k6/bench-varied.js` extrai esses valores em métricas k6.
+    /// </summary>
+    private unsafe void ProcessWithTiming(Socket client, IvfDetector ivf, ReadOnlySpan<byte> body)
+    {
+        Span<float> vec = stackalloc float[16];
+        vec.Clear();
+
+        long tStart = Stopwatch.GetTimestamp();
+        TransactionParser.Parse(body, vec);
+        long tParseEnd = Stopwatch.GetTimestamp();
+
+        long* ticks = stackalloc long[IvfDetector.TimingsCount];
+        var (approved, fraudCount) = ivf.ScoreWithTimings(vec, ticks);
+        long tTotal = Stopwatch.GetTimestamp() - tStart;
+
+        // Body é o mesmo do LUT pré-pronto — só prepende um framing custom
+        // com Server-Timing header.
+        byte[] preBuilt = _responses.Get(approved, fraudCount);
+        // O preBuilt começa com "HTTP/1.1 200 OK\r\nContent-Length: ...\r\n
+        // Content-Type: application/json\r\n\r\n<body>". Pegamos o body
+        // (após \r\n\r\n) e remontamos com o header extra.
+        int sep = preBuilt.AsSpan().IndexOf("\r\n\r\n"u8);
+        ReadOnlySpan<byte> jsonBody = preBuilt.AsSpan(sep + 4);
+
+        var sb = new StringBuilder(180);
+        sb.Append("HTTP/1.1 200 OK\r\n");
+        sb.Append("Content-Length: ").Append(jsonBody.Length).Append("\r\n");
+        sb.Append("Content-Type: application/json\r\n");
+        sb.Append("Server-Timing: ");
+        sb.Append("parse;dur=").Append(((tParseEnd - tStart) * TickToUs).ToString("F2"));
+        sb.Append(", s1-cent;dur=").Append((ticks[0] * TickToUs).ToString("F2"));
+        sb.Append(", s1-scan;dur=").Append((ticks[1] * TickToUs).ToString("F2"));
+        sb.Append(", s1-bbox;dur=").Append((ticks[2] * TickToUs).ToString("F2"));
+        sb.Append(", s2-rerank;dur=").Append((ticks[3] * TickToUs).ToString("F2"));
+        sb.Append(", total;dur=").Append((tTotal * TickToUs).ToString("F2"));
+        sb.Append("\r\n\r\n");
+
+        byte[] head = Encoding.ASCII.GetBytes(sb.ToString());
+        SendAll(client, head);
+        SendAll(client, jsonBody);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
