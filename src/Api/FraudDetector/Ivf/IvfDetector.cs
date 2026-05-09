@@ -21,6 +21,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
     private readonly short* _centroids;
     private readonly short* _bboxMin;
     private readonly short* _bboxMax;
+    private readonly uint* _clusterRadius; // v8: ceil(sqrt(max int16-sq dist)) per cluster
     private readonly IvfBinaryFormat.ClusterMeta* _clusterMeta;
     private readonly short* _vectors;
     private readonly byte* _labels;
@@ -31,7 +32,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
     public int TotalSlots { get; }
     public int NprobeFast { get; }
     public int NprobeFull { get; }
-    public string Description => $"IVF v7 SoA-block {NumClusters} clusters, int16 centroids+vectors + f32-rerank, nprobe={NprobeFull}";
+    public string Description => $"IVF v8 SoA-block {NumClusters} clusters, int16 centroids+vectors+radius + f32-rerank, nprobe={NprobeFull}";
 
     /// <summary>
     /// Counter usado em testes/diagnóstico. Incrementado cada vez que
@@ -78,6 +79,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
         _centroids = (short*)(_basePtr + IvfBinaryFormat.CentroidsOffset);
         _bboxMin = (short*)(_basePtr + IvfBinaryFormat.BboxMinOffset(numClusters));
         _bboxMax = (short*)(_basePtr + IvfBinaryFormat.BboxMaxOffset(numClusters));
+        _clusterRadius = (uint*)(_basePtr + IvfBinaryFormat.ClusterRadiusOffset(numClusters));
         _clusterMeta = (IvfBinaryFormat.ClusterMeta*)(_basePtr + IvfBinaryFormat.ClusterMetaOffset(numClusters));
         _vectors = (short*)(_basePtr + IvfBinaryFormat.VectorsOffset(numClusters));
         _labels = _basePtr + IvfBinaryFormat.LabelsOffset(numClusters, totalSlots);
@@ -290,6 +292,10 @@ public sealed unsafe class IvfDetector : IFraudDetector
         int* probeList  = stackalloc int[actualNprobe];
         int* probeDists = stackalloc int[actualNprobe];
         int probeCount = 0;
+        // v8: cache the int16-squared centroid distance per cluster so the
+        // pass-2 triangle-inequality skip can reuse it without recomputing
+        // any SIMD work. 4096 clusters * 4 B = 16 KB on the call stack.
+        int* centroidDist = stackalloc int[numClusters];
 
         long t0 = ticksOut != null ? Stopwatch.GetTimestamp() : 0;
 
@@ -306,6 +312,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
                 SimdDistance.Prefetch(_centroids + (c + 8) * pd);
 
             int dist = SimdDistance.Int16L2Squared(qInt, _centroids + c * pd);
+            centroidDist[c] = dist;
 
             if (probeCount < actualNprobe)
             {
@@ -378,15 +385,35 @@ public sealed unsafe class IvfDetector : IFraudDetector
             }
 
             int worstDist = heapSize == k ? heapDist[0] : int.MaxValue;
+            // Triangle bound: skip cluster c if d(q,C_c)² > (sqrt(worstDist) + r_c)².
+            // Reuses the centroidDist[c] computed above. Cheaper than the bbox-LB
+            // SIMD compute, so cascade triangle → bbox → ScanCluster. sqrtWorst
+            // is recomputed only when worstDist actually drops (heap-top update),
+            // which is rare relative to the 4096-cluster walk.
+            long sqrtWorstCeil = heapSize == k ? (long)Math.Ceiling(Math.Sqrt(worstDist)) : long.MaxValue;
             for (int c = 0; c < numClusters; c++)
             {
                 if ((scannedBits[c >> 6] & (1UL << (c & 63))) != 0) continue;
+
+                if (sqrtWorstCeil != long.MaxValue)
+                {
+                    long thresh = sqrtWorstCeil + _clusterRadius[c];
+                    if ((long)centroidDist[c] > thresh * thresh) continue;
+                }
 
                 int lb = SimdDistance.Int16BboxLowerBound(qInt, _bboxMin + c * pd, _bboxMax + c * pd);
                 if (lb <= worstDist)
                 {
                     ScanCluster(qInt, qPairs, c, heapIdx, heapDist, ref heapSize, k);
-                    if (heapSize == k) worstDist = heapDist[0];
+                    if (heapSize == k)
+                    {
+                        int newWorst = heapDist[0];
+                        if (newWorst != worstDist)
+                        {
+                            worstDist = newWorst;
+                            sqrtWorstCeil = (long)Math.Ceiling(Math.Sqrt(worstDist));
+                        }
+                    }
                 }
             }
         }
