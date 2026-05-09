@@ -480,8 +480,12 @@ public sealed unsafe class IvfDetector : IFraudDetector
         int b = 0;
         for (; b + 1 < numBlocks; b += 2)
         {
+            // Single base pointer + constant displacement (blockShorts) for
+            // block b+1 instead of a second live local. ILC was reloading
+            // blockPtr1 from the stack on every kp-iteration — folding the
+            // disp into [base + idx*scale + disp32] frees that register and
+            // kills the per-iter spill load (verified in objdump of v8).
             short* blockPtr0 = clusterVecBase + b * blockShorts;
-            short* blockPtr1 = blockPtr0 + blockShorts;
 
             if (b + 4 < numBlocks)
                 Sse.Prefetch0(clusterVecBase + (b + 4) * blockShorts);
@@ -496,7 +500,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
             for (int kp = 0; kp < earlyExitDimPairs; kp++)
             {
                 var v0 = Avx2.LoadVector256(blockPtr0 + kp * 16).AsInt16();
-                var v1 = Avx2.LoadVector256(blockPtr1 + kp * 16).AsInt16();
+                var v1 = Avx2.LoadVector256(blockPtr0 + blockShorts + kp * 16).AsInt16();
                 var diff0 = Avx2.Subtract(v0, qBroadcast[kp]);
                 var diff1 = Avx2.Subtract(v1, qBroadcast[kp]);
                 partial0 = Avx2.Add(partial0, Avx2.MultiplyAddAdjacent(diff0, diff0));
@@ -549,7 +553,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
                 Vector256<int> full1 = partial1;
                 for (int kp = earlyExitDimPairs; kp < dimPairs; kp++)
                 {
-                    var v1 = Avx2.LoadVector256(blockPtr1 + kp * 16).AsInt16();
+                    var v1 = Avx2.LoadVector256(blockPtr0 + blockShorts + kp * 16).AsInt16();
                     var diff1 = Avx2.Subtract(v1, qBroadcast[kp]);
                     full1 = Avx2.Add(full1, Avx2.MultiplyAddAdjacent(diff1, diff1));
                 }
