@@ -40,6 +40,22 @@ public sealed unsafe class IvfDetector : IFraudDetector
     /// </summary>
     public static int Pass2InvocationsForTest;
 
+    /// <summary>
+    /// Quantos dim-pairs a pass de early-exit do ScanClusterAvx2 acumula
+    /// antes de comparar com o threshold worstDist. Default 4 (= metade dos
+    /// 8 dim-pairs em D=14 padded 16). Override via env EARLY_EXIT_DIMS pra
+    /// A/B sem rebuild. Faixa válida [1, 8].
+    /// </summary>
+    private static readonly int s_earlyExitDimPairs = ParseEarlyExitDims();
+
+    private static int ParseEarlyExitDims()
+    {
+        if (int.TryParse(Environment.GetEnvironmentVariable("EARLY_EXIT_DIMS"), out var v)
+            && v >= 1 && v <= 8)
+            return v;
+        return 4;
+    }
+
     private IvfDetector(MemoryMappedFile mmf, MemoryMappedViewAccessor accessor, byte* basePtr,
         int numVectors, int numClusters, int totalSlots, int nprobeFast, int nprobeFull,
         MemoryMappedFile? exactMmf = null, MemoryMappedViewAccessor? exactAccessor = null, float* exactVectors = null)
@@ -419,7 +435,11 @@ public sealed unsafe class IvfDetector : IFraudDetector
         const int bv = IvfBinaryFormat.BlockVectors;
         const int blockShorts = pd * bv;
         const int dimPairs = pd / 2;
-        const int earlyExitDimPairs = 4;
+        // Lê o static readonly numa local pra forçar hoist do load fora dos
+        // loops (JIT pode não confiar em static readonly como invariante
+        // dentro de hot path). Custo: 1 ldsfld no setup. Inner loops usam
+        // a local, mantendo perf de const.
+        int earlyExitDimPairs = s_earlyExitDimPairs;
 
         Span<Vector256<short>> qBroadcast = stackalloc Vector256<short>[dimPairs];
         for (int kp = 0; kp < dimPairs; kp++)
