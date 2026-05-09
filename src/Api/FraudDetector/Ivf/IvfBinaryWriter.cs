@@ -41,8 +41,19 @@ public static class IvfBinaryWriter
             }
         }
 
+        // Quantize centroids early — both the bbox empty-cluster fallback and
+        // the per-cluster radius computation need them in int16 space.
+        var int16Centroids = new short[k * pd];
+        for (int i = 0; i < k * pd; i++)
+            int16Centroids[i] = ClampToShort(ivf.Centroids[i] * scale);
+
         var bboxMin = new short[k * pd];
         var bboxMax = new short[k * pd];
+        // v8: per-cluster radius = ceil(sqrt(max int16-squared distance from
+        // int16 centroid to any int16 vector in the cluster)). Kept in the
+        // same units as Int16L2Squared so triangle-inequality skip in pass-2
+        // can compare directly against the int heap-distance.
+        var clusterRadius = new uint[k];
         for (int c = 0; c < k; c++)
         {
             int baseOff = c * pd;
@@ -54,21 +65,29 @@ public static class IvfBinaryWriter
 
             int dstOff = paddedOffsets[c];
             int count = counts[c];
+            int maxSq = 0;
             for (int i = 0; i < count; i++)
             {
                 int vOff = (dstOff + i) * pd;
+                int sq = 0;
                 for (int d = 0; d < pd; d++)
                 {
                     short v = int16Vectors[vOff + d];
                     if (v < bboxMin[baseOff + d]) bboxMin[baseOff + d] = v;
                     if (v > bboxMax[baseOff + d]) bboxMax[baseOff + d] = v;
+                    int diff = v - int16Centroids[baseOff + d];
+                    sq += diff * diff;
                 }
+                if (sq > maxSq) maxSq = sq;
             }
+            // ceil(sqrt) — conservative upper bound preserves triangle-skip
+            // safety (no false rejects).
+            clusterRadius[c] = maxSq == 0 ? 0u : (uint)Math.Ceiling(Math.Sqrt(maxSq));
 
             if (count == 0)
                 for (int d = 0; d < pd; d++)
                 {
-                    short cv = ClampToShort(ivf.Centroids[baseOff + d] * scale);
+                    short cv = int16Centroids[baseOff + d];
                     bboxMin[baseOff + d] = cv;
                     bboxMax[baseOff + d] = cv;
                 }
@@ -106,16 +125,15 @@ public static class IvfBinaryWriter
         bw.Write((uint)totalSlots);
         bw.Write(new byte[IvfBinaryFormat.HeaderSize - 10 * 4]);
 
-        // v7: centroids stored as int16 (scale=4096), matching the
-        // query-side quantization. Stage-1 centroid scan now uses
+        // v7+: centroids stored as int16 (scale=4096), matching the
+        // query-side quantization. Stage-1 centroid scan uses
         // SimdDistance.Int16L2Squared instead of float L2 — same
         // ranking precision with half the bandwidth.
-        var int16Centroids = new short[k * pd];
-        for (int i = 0; i < k * pd; i++)
-            int16Centroids[i] = ClampToShort(ivf.Centroids[i] * scale);
         WriteShortArray(bw, int16Centroids, k * pd);
         WriteShortArray(bw, bboxMin, k * pd);
         WriteShortArray(bw, bboxMax, k * pd);
+        // v8: per-cluster radius for triangle-inequality skip in pass-2.
+        WriteUInt32Array(bw, clusterRadius, k);
 
         for (int c = 0; c < k; c++)
         {
@@ -154,6 +172,13 @@ public static class IvfBinaryWriter
     private static void WriteInt32Array(BinaryWriter bw, int[] data, int count)
     {
         var bytes = new byte[(long)count * sizeof(int)];
+        Buffer.BlockCopy(data, 0, bytes, 0, bytes.Length);
+        bw.Write(bytes);
+    }
+
+    private static void WriteUInt32Array(BinaryWriter bw, uint[] data, int count)
+    {
+        var bytes = new byte[(long)count * sizeof(uint)];
         Buffer.BlockCopy(data, 0, bytes, 0, bytes.Length);
         bw.Write(bytes);
     }

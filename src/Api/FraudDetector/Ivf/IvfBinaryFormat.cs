@@ -5,7 +5,7 @@ namespace Rinha.Api;
 public static class IvfBinaryFormat
 {
     public static ReadOnlySpan<byte> Magic => "IVFR"u8;
-    public const uint Version = 7;
+    public const uint Version = 8;
     public const int HeaderSize = 64;
     public const int Dims = 14;
     public const int PaddedDims = 16;
@@ -14,6 +14,9 @@ public static class IvfBinaryFormat
     public const int BlockBytes = BlockVectors * PaddedDims * sizeof(short);
     public const int CentroidVectorBytes = PaddedDims * sizeof(short);
     public const int Int16VectorBytes = PaddedDims * sizeof(short);
+    // v8: per-cluster radius (uint, ceil(sqrt(max int16-squared centroid→vec
+    // distance))). Used by pass-2 triangle-inequality skip before bbox-LB.
+    public const int ClusterRadiusBytes = sizeof(uint);
 
     [StructLayout(LayoutKind.Sequential, Pack = 1)]
     public struct ClusterMeta
@@ -30,8 +33,11 @@ public static class IvfBinaryFormat
     public static long BboxMaxOffset(int numClusters) =>
         BboxMinOffset(numClusters) + (long)numClusters * Int16VectorBytes;
 
-    public static long ClusterMetaOffset(int numClusters) =>
+    public static long ClusterRadiusOffset(int numClusters) =>
         BboxMaxOffset(numClusters) + (long)numClusters * Int16VectorBytes;
+
+    public static long ClusterMetaOffset(int numClusters) =>
+        ClusterRadiusOffset(numClusters) + (long)numClusters * ClusterRadiusBytes;
 
     public static long VectorsOffset(int numClusters) =>
         ClusterMetaOffset(numClusters) + (long)numClusters * 8;
