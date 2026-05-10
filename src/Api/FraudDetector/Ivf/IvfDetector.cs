@@ -19,6 +19,13 @@ public sealed unsafe class IvfDetector : IFraudDetector
     private readonly float* _exactVectors; // null if not loaded
 
     private readonly short* _centroids;
+    // Centróides em layout dim-major (`_centroidsT[d * K + c]`) alocados em
+    // heap unmanaged. Pré-computado em Open() a partir do mmap K-major.
+    // Substitui a passagem K iterações × Int16L2Squared (com horizontal
+    // reduce por cluster) por uma passagem dim-major com K acumuladores
+    // int32 mantidos vector-form. Custo memória: K * pd * 2 = 128 KB (cabe
+    // no L2 256 KB Haswell).
+    private readonly short* _centroidsT;
     private readonly short* _bboxMin;
     private readonly short* _bboxMax;
     private readonly uint* _clusterRadius; // v8: ceil(sqrt(max int16-sq dist)) per cluster
@@ -96,6 +103,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
         NprobeFull = envFull > 0 ? envFull : nprobeFull;
 
         _centroids = (short*)(_basePtr + IvfBinaryFormat.CentroidsOffset);
+        _centroidsT = AllocAndTransposeCentroids(_centroids, numClusters, IvfBinaryFormat.PaddedDims);
         _bboxMin = (short*)(_basePtr + IvfBinaryFormat.BboxMinOffset(numClusters));
         _bboxMax = (short*)(_basePtr + IvfBinaryFormat.BboxMaxOffset(numClusters));
         _clusterRadius = (uint*)(_basePtr + IvfBinaryFormat.ClusterRadiusOffset(numClusters));
@@ -357,21 +365,17 @@ public sealed unsafe class IvfDetector : IFraudDetector
 
         long t0 = ticksOut != null ? Stopwatch.GetTimestamp() : 0;
 
+        // Compute all K centroid distances in a single dim-major SIMD pass.
+        // Substitui o loop K × Int16L2Squared (horizontal reduce por
+        // cluster). Working-set por dim = K * 2 = 8 KB, cabe em L1
+        // Haswell (32 KB). Padding dims [D..pd) zeros não contribuem.
+        SimdDistance.Int16L2SquaredAllDimMajor(qInt, _centroidsT, centroidDist, numClusters, pd);
+
+        // Walk K distances and build the top-actualNprobe min-heap (by
+        // largest at root, so a new smaller dist can replace root).
         for (int c = 0; c < numClusters; c++)
         {
-            // Prefetch o centroide c+8 — cada centroide = 32 B (16 shorts) =
-            // ½ cache line. Distância 8 = 256 B = 4 linhas adiantadas.
-            // Haswell L2 latency ~12 ciclos, DRAM ~200 ciclos; com
-            // Int16L2Squared ~16 ciclos/iter, 4 linhas à frente cobre
-            // ~50 ciclos de antecipação — boa margem sem inundar a fila
-            // de prefetch. (A/B local não confiável no Mac mini do dev;
-            // próxima rodada oficial pode validar contra c+4/c+12.)
-            if (c + 8 < numClusters)
-                SimdDistance.Prefetch(_centroids + (c + 8) * pd);
-
-            int dist = SimdDistance.Int16L2Squared(qInt, _centroids + c * pd);
-            centroidDist[c] = dist;
-
+            int dist = centroidDist[c];
             if (probeCount < actualNprobe)
             {
                 int pos = probeCount++;
@@ -827,11 +831,23 @@ public sealed unsafe class IvfDetector : IFraudDetector
 
     public void Dispose()
     {
+        if (_centroidsT != null)
+            System.Runtime.InteropServices.NativeMemory.AlignedFree(_centroidsT);
         _exactAccessor?.SafeMemoryMappedViewHandle.ReleasePointer();
         _exactAccessor?.Dispose();
         _exactMmf?.Dispose();
         _accessor.SafeMemoryMappedViewHandle.ReleasePointer();
         _accessor.Dispose();
         _mmf.Dispose();
+    }
+
+    private static short* AllocAndTransposeCentroids(short* centroids, int K, int pd)
+    {
+        nuint bytes = (nuint)((long)K * pd * sizeof(short));
+        short* buf = (short*)System.Runtime.InteropServices.NativeMemory.AlignedAlloc(bytes, 64);
+        for (int c = 0; c < K; c++)
+            for (int d = 0; d < pd; d++)
+                buf[(long)d * K + c] = centroids[(long)c * pd + d];
+        return buf;
     }
 }

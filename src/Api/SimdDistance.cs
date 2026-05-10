@@ -258,4 +258,68 @@ public static class SimdDistance
         if (Sse.IsSupported)
             Sse.Prefetch0(ptr);
     }
+
+    /// <summary>
+    /// Computa K distâncias L2² centroid-vs-query em uma única passagem
+    /// dim-major sobre <paramref name="centroidsT"/> (layout transposto:
+    /// <c>centroidsT[d * K + c] = centroid[c][d]</c>).
+    ///
+    /// Vs. K iterações de Int16L2Squared: substitui o horizontal-reduce
+    /// por cluster (3-4 ciclos dep chain × K) por K acumuladores int32
+    /// que ficam vector-form durante toda a passagem. Cada dim é uma
+    /// banda contígua (K * 2 bytes = 8 KB pra K=4096), o que mantém o
+    /// working-set num L1 (32 KB Haswell). Hoist do broadcast q[d]
+    /// fora do c-loop também economiza ciclos.
+    ///
+    /// Pré-cond: K % 16 == 0; padding dims [D..pd) zeros (contribuem 0).
+    /// </summary>
+    public static unsafe void Int16L2SquaredAllDimMajor(
+        short* qInt, short* centroidsT, int* outDists, int K, int pd)
+    {
+        if (Avx2.IsSupported)
+        {
+            // Inicializa acumuladores em zero
+            var zero = Vector256<int>.Zero;
+            for (int c = 0; c < K; c += 8)
+                Avx.Store(outDists + c, zero);
+
+            for (int d = 0; d < pd; d++)
+            {
+                var qd = Vector256.Create(qInt[d]);
+                short* dimBase = centroidsT + (long)d * K;
+
+                for (int c = 0; c < K; c += 16)
+                {
+                    var cents = Avx.LoadVector256(dimBase + c);
+                    var diff = Avx2.Subtract(cents, qd);
+
+                    // 16 shorts → 2× 8 int32 → square → add to accumulator
+                    var diffLo = diff.GetLower();
+                    var diffLo32 = Avx2.ConvertToVector256Int32(diffLo);
+                    var sqLo = Avx2.MultiplyLow(diffLo32, diffLo32);
+                    var accLo = Avx.LoadVector256(outDists + c);
+                    Avx.Store(outDists + c, Avx2.Add(accLo, sqLo));
+
+                    var diffHi = Avx2.ExtractVector128(diff, 1);
+                    var diffHi32 = Avx2.ConvertToVector256Int32(diffHi);
+                    var sqHi = Avx2.MultiplyLow(diffHi32, diffHi32);
+                    var accHi = Avx.LoadVector256(outDists + c + 8);
+                    Avx.Store(outDists + c + 8, Avx2.Add(accHi, sqHi));
+                }
+            }
+            return;
+        }
+
+        // Scalar fallback (test/non-AVX2 platforms)
+        for (int c = 0; c < K; c++)
+        {
+            int sum = 0;
+            for (int d = 0; d < pd; d++)
+            {
+                int diff = centroidsT[d * K + c] - qInt[d];
+                sum += diff * diff;
+            }
+            outDists[c] = sum;
+        }
+    }
 }
