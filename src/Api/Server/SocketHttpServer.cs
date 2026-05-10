@@ -181,7 +181,9 @@ public sealed class SocketHttpServer : IDisposable
         long tParseEnd = Stopwatch.GetTimestamp();
 
         long* ticks = stackalloc long[IvfDetector.TimingsCount];
-        var (approved, fraudCount) = ivf.ScoreWithTimings(vec, ticks);
+        int* counts = stackalloc int[IvfDetector.CountersCount];
+        for (int i = 0; i < IvfDetector.CountersCount; i++) counts[i] = 0;
+        var (approved, fraudCount) = ivf.ScoreWithTimings(vec, ticks, counts);
         long tTotal = Stopwatch.GetTimestamp() - tStart;
 
         // Body é o mesmo do LUT pré-pronto — só prepende um framing custom
@@ -204,6 +206,13 @@ public sealed class SocketHttpServer : IDisposable
         sb.Append(", s1-bbox;dur=").Append((ticks[2] * TickToUs).ToString("F2"));
         sb.Append(", s2-rerank;dur=").Append((ticks[3] * TickToUs).ToString("F2"));
         sb.Append(", total;dur=").Append((tTotal * TickToUs).ToString("F2"));
+        // Pass-2 cascade counts piggy-backed as "dur" entries (a hack — the
+        // unit is clusters, not µs, but our analysis parser reads any numeric
+        // value). c-tri = pruned by triangle, c-bbox = pruned by bbox-LB,
+        // c-scan = ScanCluster invoked. Sum = (numClusters - probeCount).
+        sb.Append(", c-tri;dur=").Append(counts[0]);
+        sb.Append(", c-bbox;dur=").Append(counts[1]);
+        sb.Append(", c-scan;dur=").Append(counts[2]);
         sb.Append("\r\n\r\n");
 
         byte[] head = Encoding.ASCII.GetBytes(sb.ToString());
