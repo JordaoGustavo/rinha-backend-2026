@@ -27,12 +27,21 @@ public sealed unsafe class IvfDetector : IFraudDetector
     private readonly byte* _labels;
     private readonly int* _originalIndices; // slot → original global index in exact.bin
 
+    // v9: profile fast path. _profileMask[k] = 0|1|2|3 (legit/fraud/mixed
+    // bitset), _profileCount[k] = ushort training-sample count. Habilitado
+    // por env PROFILE_FAST_PATH (default 1). Threshold mínimo via
+    // PROFILE_MIN_COUNT (default 30).
+    private readonly byte* _profileMask;
+    private readonly ushort* _profileCount;
+    private readonly bool _profileEnabled;
+    private readonly int _profileMinCount;
+
     public int NumVectors { get; }
     public int NumClusters { get; }
     public int TotalSlots { get; }
     public int NprobeFast { get; }
     public int NprobeFull { get; }
-    public string Description => $"IVF v8 SoA-block {NumClusters} clusters, int16 centroids+vectors+radius + f32-rerank, nprobe={NprobeFull}";
+    public string Description => $"IVF v9 SoA-block {NumClusters} clusters, int16 centroids+vectors+radius + f32-rerank + profile-fastpath(min={_profileMinCount},enabled={_profileEnabled}), nprobe={NprobeFull}";
 
     /// <summary>
     /// Counter usado em testes/diagnóstico. Incrementado cada vez que
@@ -40,6 +49,16 @@ public sealed unsafe class IvfDetector : IFraudDetector
     /// não-borderline, fica abaixo do total de queries.
     /// </summary>
     public static int Pass2InvocationsForTest;
+
+    /// <summary>
+    /// Contadores de cobertura do profile fast path (dev/diagnóstico).
+    /// Updated mesmo em prod (custo: 2 incrementos atomic-free) — útil
+    /// pra calibrar PROFILE_MIN_COUNT e auditar drift entre training
+    /// distribution e tráfego real.
+    /// </summary>
+    public static long ProfileFastPathLegitHits;
+    public static long ProfileFastPathFraudHits;
+    public static long ProfileFastPathMisses;
 
     /// <summary>
     /// Quantos dim-pairs a pass de early-exit do ScanClusterAvx2 acumula
@@ -84,6 +103,12 @@ public sealed unsafe class IvfDetector : IFraudDetector
         _vectors = (short*)(_basePtr + IvfBinaryFormat.VectorsOffset(numClusters));
         _labels = _basePtr + IvfBinaryFormat.LabelsOffset(numClusters, totalSlots);
         _originalIndices = (int*)(_basePtr + IvfBinaryFormat.OriginalIndicesOffset(numClusters, totalSlots));
+        _profileMask = _basePtr + IvfBinaryFormat.ProfileMaskOffset(numClusters, totalSlots);
+        _profileCount = (ushort*)(_basePtr + IvfBinaryFormat.ProfileCountOffset(numClusters, totalSlots));
+
+        _profileEnabled = (Environment.GetEnvironmentVariable("PROFILE_FAST_PATH") ?? "1") != "0";
+        _profileMinCount = int.TryParse(Environment.GetEnvironmentVariable("PROFILE_MIN_COUNT"), out var pmc) && pmc > 0
+            ? pmc : 30;
     }
 
     public static IvfDetector Open(string path)
@@ -210,6 +235,30 @@ public sealed unsafe class IvfDetector : IFraudDetector
             if (v > short.MaxValue) qInt[d] = short.MaxValue;
             else if (v < short.MinValue) qInt[d] = short.MinValue;
             else qInt[d] = (short)v;
+        }
+
+        // Profile fast path: bucket monocromático com count >= threshold
+        // devolve a resposta sem tocar no IVF. Atalho de ~50 ns vs ~1 ms
+        // do IVF completo. ticksOut == null evita overhead do timing
+        // path; ticks dos estágios IVF ficam zerados quando o atalho
+        // dispara, indicando "fast-path hit" no Server-Timing.
+        if (_profileEnabled && ticksOut == null)
+        {
+            int pkey = ProfileFastPath.Key(qInt);
+            byte pmask = _profileMask[pkey];
+            if (pmask == IvfBinaryFormat.ProfileLegitMask
+                && _profileCount[pkey] >= _profileMinCount)
+            {
+                ProfileFastPathLegitHits++;
+                return (true, 0);
+            }
+            if (pmask == IvfBinaryFormat.ProfileFraudMask
+                && _profileCount[pkey] >= _profileMinCount)
+            {
+                ProfileFastPathFraudHits++;
+                return (false, 5);
+            }
+            ProfileFastPathMisses++;
         }
 
         int* qPairs = stackalloc int[pd / 2];
