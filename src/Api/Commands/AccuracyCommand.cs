@@ -81,6 +81,12 @@ public static class AccuracyCommand
         double ivfMs    = (double)ivfTicks    / Stopwatch.Frequency * 1000.0 / count;
         double oracleMs = (double)oracleTicks / Stopwatch.Frequency * 1000.0 / count;
 
+        long fpLegit = IvfDetector.ProfileFastPathLegitHits;
+        long fpFraud = IvfDetector.ProfileFastPathFraudHits;
+        long fpMiss  = IvfDetector.ProfileFastPathMisses;
+        long fpHits  = fpLegit + fpFraud;
+        long fpTotal = fpHits + fpMiss;
+
         Console.WriteLine();
         Console.WriteLine("═══════════════════════════════════════════════════");
         Console.WriteLine("           ACCURACY HARNESS RESULTS");
@@ -94,6 +100,14 @@ public static class AccuracyCommand
         Console.WriteLine();
         Console.WriteLine($"ivf    avg latency:      {ivfMs:F3} ms");
         Console.WriteLine($"oracle avg latency:      {oracleMs:F3} ms");
+        if (fpTotal > 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine($"profile fast-path hits:  {fpHits} / {fpTotal} ({100.0 * fpHits / fpTotal:F2}%)");
+            Console.WriteLine($"  → legit hits:          {fpLegit} ({100.0 * fpLegit / fpTotal:F2}%)");
+            Console.WriteLine($"  → fraud hits:          {fpFraud} ({100.0 * fpFraud / fpTotal:F2}%)");
+            Console.WriteLine($"  → misses (IVF ran):    {fpMiss} ({100.0 * fpMiss / fpTotal:F2}%)");
+        }
         Console.WriteLine();
         if (firstFailures.Count > 0)
         {

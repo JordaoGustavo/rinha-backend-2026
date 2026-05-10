@@ -144,7 +144,52 @@ public static class IvfBinaryWriter
         WriteShortArray(bw, blockedVectors, totalSlots * pd);
         bw.Write(paddedLabels, 0, totalSlots);
         WriteInt32Array(bw, paddedOriginalIndices, totalSlots);
+
+        // v9: profile fast path. Reusa os int16 já quantizados (linear
+        // layout, NÃO o blockedVectors que é AoSoA-8). Iteramos slots
+        // padded mas ignoramos os de padding (paddedOriginalIndices == -1).
+        Console.WriteLine("  Building profile fast path mask + count...");
+        var (profileMask, profileCount) = BuildProfileFromInt16Vectors(
+            int16Vectors, paddedLabels, paddedOriginalIndices, totalSlots);
+        bw.Write(profileMask, 0, profileMask.Length);
+        WriteUInt16Array(bw, profileCount, profileCount.Length);
+
+        long pureLegit = 0, pureFraud = 0, mixed = 0, empty = 0;
+        for (int i = 0; i < profileMask.Length; i++)
+        {
+            switch (profileMask[i])
+            {
+                case 0: empty++; break;
+                case IvfBinaryFormat.ProfileLegitMask: pureLegit++; break;
+                case IvfBinaryFormat.ProfileFraudMask: pureFraud++; break;
+                default: mixed++; break;
+            }
+        }
+        Console.WriteLine($"  Profile: pure-legit={pureLegit:N0}, pure-fraud={pureFraud:N0}, mixed={mixed:N0}, empty={empty:N0}");
+
         bw.Flush();
+    }
+
+    private static (byte[] mask, ushort[] count) BuildProfileFromInt16Vectors(
+        short[] vectors, byte[] labels, int[] originalIndices, int totalSlots)
+    {
+        var mask = new byte[IvfBinaryFormat.ProfileKeyCount];
+        var count = new ushort[IvfBinaryFormat.ProfileKeyCount];
+        const int pd = IvfBinaryFormat.PaddedDims;
+
+        for (int i = 0; i < totalSlots; i++)
+        {
+            // Skip padding slots (no real training point assigned).
+            if (originalIndices[i] < 0) continue;
+            ReadOnlySpan<short> v = new ReadOnlySpan<short>(vectors, i * pd, pd);
+            int key = ProfileFastPath.Key(v);
+            if (count[key] < ushort.MaxValue) count[key]++;
+            mask[key] |= labels[i] == 1
+                ? IvfBinaryFormat.ProfileFraudMask
+                : IvfBinaryFormat.ProfileLegitMask;
+        }
+
+        return (mask, count);
     }
 
     private static short ClampToShort(float v)
@@ -179,6 +224,13 @@ public static class IvfBinaryWriter
     private static void WriteUInt32Array(BinaryWriter bw, uint[] data, int count)
     {
         var bytes = new byte[(long)count * sizeof(uint)];
+        Buffer.BlockCopy(data, 0, bytes, 0, bytes.Length);
+        bw.Write(bytes);
+    }
+
+    private static void WriteUInt16Array(BinaryWriter bw, ushort[] data, int count)
+    {
+        var bytes = new byte[(long)count * sizeof(ushort)];
         Buffer.BlockCopy(data, 0, bytes, 0, bytes.Length);
         bw.Write(bytes);
     }
