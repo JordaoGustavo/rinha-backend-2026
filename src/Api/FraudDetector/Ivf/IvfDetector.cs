@@ -171,18 +171,27 @@ public sealed unsafe class IvfDetector : IFraudDetector
     /// </summary>
     public const int TimingsCount = 4;
 
+    /// <summary>
+    /// Pass-2 cascade counter layout: [trianglePruned, bboxPruned, scanned].
+    /// Together they sum to (numClusters - probeCount) — every non-probed
+    /// cluster ends in exactly one bucket.
+    /// </summary>
+    public const int CountersCount = 3;
+
     public (bool Approved, int FraudCount) Score(ReadOnlySpan<float> query)
-        => ScoreCore(query, ticksOut: null);
+        => ScoreCore(query, ticksOut: null, countsOut: null);
 
     /// <summary>
     /// Dev-only path. Same algorithm as <see cref="Score"/>, but writes
-    /// per-stage tick counts to <paramref name="ticksOut"/> (length 4).
+    /// per-stage tick counts to <paramref name="ticksOut"/> (length 4) and
+    /// pass-2 cluster fate counts to <paramref name="countsOut"/> (length 3).
+    /// Either pointer may be null to skip that side.
     /// </summary>
-    public (bool Approved, int FraudCount) ScoreWithTimings(ReadOnlySpan<float> query, long* ticksOut)
-        => ScoreCore(query, ticksOut);
+    public (bool Approved, int FraudCount) ScoreWithTimings(ReadOnlySpan<float> query, long* ticksOut, int* countsOut = null)
+        => ScoreCore(query, ticksOut, countsOut);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private (bool Approved, int FraudCount) ScoreCore(ReadOnlySpan<float> query, long* ticksOut)
+    private (bool Approved, int FraudCount) ScoreCore(ReadOnlySpan<float> query, long* ticksOut, int* countsOut)
     {
         const int pd = IvfBinaryFormat.PaddedDims;
         const int scale = IvfBinaryFormat.Scale;
@@ -215,7 +224,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
         fixed (float* qFloat = query)
         {
             int candidateCount = FindKNearest(qFloat, qInt, qPairs, rerankN, candidateIdx,
-                                              NprobeFull, useBboxRepair: true, ticksOut);
+                                              NprobeFull, useBboxRepair: true, ticksOut, countsOut);
 
             long s2Start = ticksOut != null ? Stopwatch.GetTimestamp() : 0;
 
@@ -283,7 +292,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
     }
 
     private int FindKNearest(float* qFloat, short* qInt, int* qPairs, int k, Span<int> resultIdx,
-        int nprobe, bool useBboxRepair, long* ticksOut = null)
+        int nprobe, bool useBboxRepair, long* ticksOut = null, int* countsOut = null)
     {
         const int pd = IvfBinaryFormat.PaddedDims;
         int numClusters = NumClusters;
@@ -398,12 +407,17 @@ public sealed unsafe class IvfDetector : IFraudDetector
                 if (sqrtWorstCeil != long.MaxValue)
                 {
                     long thresh = sqrtWorstCeil + _clusterRadius[c];
-                    if ((long)centroidDist[c] > thresh * thresh) continue;
+                    if ((long)centroidDist[c] > thresh * thresh)
+                    {
+                        if (countsOut != null) countsOut[0]++;
+                        continue;
+                    }
                 }
 
                 int lb = SimdDistance.Int16BboxLowerBound(qInt, _bboxMin + c * pd, _bboxMax + c * pd);
                 if (lb <= worstDist)
                 {
+                    if (countsOut != null) countsOut[2]++;
                     ScanCluster(qInt, qPairs, c, heapIdx, heapDist, ref heapSize, k);
                     if (heapSize == k)
                     {
@@ -415,6 +429,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
                         }
                     }
                 }
+                else if (countsOut != null) countsOut[1]++;
             }
         }
 
