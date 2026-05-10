@@ -425,15 +425,6 @@ public sealed unsafe class IvfDetector : IFraudDetector
 
         if (useBboxRepair && probeCount < numClusters)
         {
-            // Tentativa de conditional bbox-repair (zan trick) revertida em
-            // 2026-05-08: com NPROBE_FULL=5 a pass-1 amostra apenas 5 dos
-            // 4096 clusters; em queries random, a sample não-representativa
-            // produz p1Fraud=0 ou p1Fraud=5,6 mesmo quando o oracle discorda.
-            // Faixa borderline {1,2,3,4} produziu 73 mismatches em 10k
-            // queries (0.73%), quebrando o requisito de 100% acurácia.
-            // O atalho exigiria NPROBE_FULL=20+ pra ter margem de pass-1.
-            // Mantida pass-2 incondicional. Pass2InvocationsForTest hoje
-            // sempre = total de queries.
             Pass2InvocationsForTest++;
 
             // Bitset of already-scanned clusters: O(1) test vs O(probeCount) linear walk.
@@ -447,24 +438,19 @@ public sealed unsafe class IvfDetector : IFraudDetector
             }
 
             int worstDist = heapSize == k ? heapDist[0] : int.MaxValue;
-            // Triangle bound: skip cluster c if d(q,C_c)² > (sqrt(worstDist) + r_c)².
-            // Reuses the centroidDist[c] computed above. Cheaper than the bbox-LB
-            // SIMD compute, so cascade triangle → bbox → ScanCluster. sqrtWorst
-            // is recomputed only when worstDist actually drops (heap-top update),
-            // which is rare relative to the 4096-cluster walk.
             long sqrtWorstCeil = heapSize == k ? (long)Math.Ceiling(Math.Sqrt(worstDist)) : long.MaxValue;
 
-            // Vectorize triangle-skip across 4 clusters at a time. int64
-            // arithmetic to avoid thresh² overflow (worst-case ~92K² ≈ 8.5e9
-            // exceeds int32). Avx2.Multiply(int32,int32)→int64 multiplies
-            // even-indexed lanes; ConvertToVector256Int64 places each 32-bit
-            // thresh in the even slot with zero high half, so the product is
-            // (t_i)² as int64. The 4096-cluster loop is the dominant
-            // pass-2 cost; this collapses ~14µs of scalar bookkeeping on
-            // Haswell into ~7µs of vector work.
+            // Two-phase pass-2: (1) triangle-only sweep collects survivors;
+            // (2) scan survivors in centroidDist-ascending order so the heap
+            // converges to tight worstDist fast, pruning more downstream.
+            int* survivorBuf = stackalloc int[numClusters];
+            int survivorCount = 0;
+
             bool vEnabled = Avx2.IsSupported && sqrtWorstCeil != long.MaxValue;
             Vector256<long> vSqrtWorst = vEnabled ? Vector256.Create(sqrtWorstCeil) : Vector256<long>.Zero;
             const int Lanes = 4;
+
+            // Phase 1: triangle-only sweep — collect survivors
             for (int cBase = 0; cBase < numClusters; cBase += Lanes)
             {
                 int scannedMask = (int)((scannedBits[cBase >> 6] >> (cBase & 63)) & 0xF);
@@ -496,29 +482,66 @@ public sealed unsafe class IvfDetector : IFraudDetector
                     int bit = BitOperations.TrailingZeroCount(survivorMask);
                     survivorMask &= survivorMask - 1;
                     int c = cBase + bit;
+                    survivorBuf[survivorCount] = c;
+                    survivorCount++;
+                }
+            }
 
-                    int lb = SimdDistance.Int16BboxLowerBound(qInt, _bboxMin + c * pd, _bboxMax + c * pd);
-                    if (lb <= worstDist)
+            // Shell sort survivors by centroidDist ascending. O(n^{4/3}) worst case,
+            // fast for typical ~100-500 survivors. Ciura gap sequence.
+            ReadOnlySpan<int> gaps = [301, 132, 57, 23, 10, 4, 1];
+            foreach (int gap in gaps)
+            {
+                if (gap >= survivorCount) continue;
+                for (int i = gap; i < survivorCount; i++)
+                {
+                    int val = survivorBuf[i];
+                    int key = centroidDist[val];
+                    int j = i - gap;
+                    while (j >= 0 && centroidDist[survivorBuf[j]] > key)
                     {
-                        if (countsOut != null) countsOut[2]++;
-                        ScanCluster(qInt, qPairs, c, heapIdx, heapDist, ref heapSize, k);
-                        if (heapSize == k)
+                        survivorBuf[j + gap] = survivorBuf[j];
+                        j -= gap;
+                    }
+                    survivorBuf[j + gap] = val;
+                }
+            }
+
+            // Phase 2: bbox check + scan in centroidDist order.
+            // Re-evaluate triangle bound as worstDist tightens — survivors
+            // collected with the initial (loose) sqrtWorst may now be prunable.
+            for (int s = 0; s < survivorCount; s++)
+            {
+                int c = survivorBuf[s];
+
+                // Re-check triangle with current (tighter) worstDist.
+                if (heapSize == k)
+                {
+                    long sw = sqrtWorstCeil;
+                    long thresh = (long)_clusterRadius[c] + sw;
+                    if ((long)centroidDist[c] > thresh * thresh)
+                    {
+                        if (countsOut != null) countsOut[0]++;
+                        continue;
+                    }
+                }
+
+                int lb = SimdDistance.Int16BboxLowerBound(qInt, _bboxMin + c * pd, _bboxMax + c * pd);
+                if (lb <= worstDist)
+                {
+                    if (countsOut != null) countsOut[2]++;
+                    ScanCluster(qInt, qPairs, c, heapIdx, heapDist, ref heapSize, k);
+                    if (heapSize == k)
+                    {
+                        int newWorst = heapDist[0];
+                        if (newWorst != worstDist)
                         {
-                            int newWorst = heapDist[0];
-                            if (newWorst != worstDist)
-                            {
-                                worstDist = newWorst;
-                                sqrtWorstCeil = (long)Math.Ceiling(Math.Sqrt(worstDist));
-                                if (Avx2.IsSupported)
-                                {
-                                    vSqrtWorst = Vector256.Create(sqrtWorstCeil);
-                                    vEnabled = true;
-                                }
-                            }
+                            worstDist = newWorst;
+                            sqrtWorstCeil = (long)Math.Ceiling(Math.Sqrt(worstDist));
                         }
                     }
-                    else if (countsOut != null) countsOut[1]++;
                 }
+                else if (countsOut != null) countsOut[1]++;
             }
         }
 
@@ -566,11 +589,9 @@ public sealed unsafe class IvfDetector : IFraudDetector
         const int bv = IvfBinaryFormat.BlockVectors;
         const int blockShorts = pd * bv;
         const int dimPairs = pd / 2;
-        // Lê o static readonly numa local pra forçar hoist do load fora dos
-        // loops (JIT pode não confiar em static readonly como invariante
-        // dentro de hot path). Custo: 1 ldsfld no setup. Inner loops usam
-        // a local, mantendo perf de const.
         int earlyExitDimPairs = s_earlyExitDimPairs;
+        // Multi-level early exit: first checkpoint at half of earlyExitDimPairs
+        int earlyExit1 = earlyExitDimPairs >> 1; // e.g. 2 when earlyExitDimPairs=4
 
         Span<Vector256<short>> qBroadcast = stackalloc Vector256<short>[dimPairs];
         for (int kp = 0; kp < dimPairs; kp++)
@@ -578,17 +599,9 @@ public sealed unsafe class IvfDetector : IFraudDetector
 
         Span<int> dists = stackalloc int[bv];
 
-        // Dual-block loop: interleave loads for block b+1 with MADD
-        // compute for block b, giving the OOE engine more independent
-        // work and hiding L2/DRAM latency on cold clusters.
         int b = 0;
         for (; b + 1 < numBlocks; b += 2)
         {
-            // Single base pointer + constant displacement (blockShorts) for
-            // block b+1 instead of a second live local. ILC was reloading
-            // blockPtr1 from the stack on every kp-iteration — folding the
-            // disp into [base + idx*scale + disp32] frees that register and
-            // kills the per-iter spill load (verified in objdump of v8).
             short* blockPtr0 = clusterVecBase + b * blockShorts;
 
             if (b + 4 < numBlocks)
@@ -599,17 +612,76 @@ public sealed unsafe class IvfDetector : IFraudDetector
             int validLanes1 = count - (b + 1) * bv;
             if (validLanes1 > bv) validLanes1 = bv;
 
-            Vector256<int> partial0 = Vector256<int>.Zero;
-            Vector256<int> partial1 = Vector256<int>.Zero;
-            for (int kp = 0; kp < earlyExitDimPairs; kp++)
+            // Dual-accumulator: break RAW dependency chain on partial accumulators.
+            // Two independent Add chains let Haswell issue MADD+Add on both ports
+            // in the same cycle instead of stalling on the single-chain latency.
+            Vector256<int> acc0a = Vector256<int>.Zero;
+            Vector256<int> acc0b = Vector256<int>.Zero;
+            Vector256<int> acc1a = Vector256<int>.Zero;
+            Vector256<int> acc1b = Vector256<int>.Zero;
+
+            // Phase 1: first earlyExit1 dim-pairs (ultra-early check)
+            for (int kp = 0; kp < earlyExit1; kp += 2)
             {
                 var v0 = Avx2.LoadVector256(blockPtr0 + kp * 16).AsInt16();
                 var v1 = Avx2.LoadVector256(blockPtr0 + blockShorts + kp * 16).AsInt16();
                 var diff0 = Avx2.Subtract(v0, qBroadcast[kp]);
                 var diff1 = Avx2.Subtract(v1, qBroadcast[kp]);
-                partial0 = Avx2.Add(partial0, Avx2.MultiplyAddAdjacent(diff0, diff0));
-                partial1 = Avx2.Add(partial1, Avx2.MultiplyAddAdjacent(diff1, diff1));
+                acc0a = Avx2.Add(acc0a, Avx2.MultiplyAddAdjacent(diff0, diff0));
+                acc1a = Avx2.Add(acc1a, Avx2.MultiplyAddAdjacent(diff1, diff1));
+
+                if (kp + 1 < earlyExit1)
+                {
+                    var v0b = Avx2.LoadVector256(blockPtr0 + (kp + 1) * 16).AsInt16();
+                    var v1b = Avx2.LoadVector256(blockPtr0 + blockShorts + (kp + 1) * 16).AsInt16();
+                    var diff0b = Avx2.Subtract(v0b, qBroadcast[kp + 1]);
+                    var diff1b = Avx2.Subtract(v1b, qBroadcast[kp + 1]);
+                    acc0b = Avx2.Add(acc0b, Avx2.MultiplyAddAdjacent(diff0b, diff0b));
+                    acc1b = Avx2.Add(acc1b, Avx2.MultiplyAddAdjacent(diff1b, diff1b));
+                }
             }
+
+            // Ultra-early exit: if heap is full and all lanes already exceed worst
+            // with only earlyExit1 dim-pairs (~25% of distance), skip both blocks.
+            if (heapSize == k)
+            {
+                var threshold1 = Vector256.Create(heapDist[0]);
+                var p0 = Avx2.Add(acc0a, acc0b);
+                var p1 = Avx2.Add(acc1a, acc1b);
+                var lt0 = Avx2.CompareGreaterThan(threshold1, p0);
+                var lt1 = Avx2.CompareGreaterThan(threshold1, p1);
+                int validBitsE0 = validLanes0 >= bv ? -1 : (1 << (validLanes0 * 4)) - 1;
+                int validBitsE1 = validLanes1 >= bv ? -1 : (1 << (validLanes1 * 4)) - 1;
+                int eMask = (Avx2.MoveMask(lt0.AsByte()) & validBitsE0)
+                          | (Avx2.MoveMask(lt1.AsByte()) & validBitsE1);
+                if (eMask == 0)
+                    continue;
+            }
+
+            // Phase 2: remaining dim-pairs up to earlyExitDimPairs
+            for (int kp = earlyExit1; kp < earlyExitDimPairs; kp += 2)
+            {
+                var v0 = Avx2.LoadVector256(blockPtr0 + kp * 16).AsInt16();
+                var v1 = Avx2.LoadVector256(blockPtr0 + blockShorts + kp * 16).AsInt16();
+                var diff0 = Avx2.Subtract(v0, qBroadcast[kp]);
+                var diff1 = Avx2.Subtract(v1, qBroadcast[kp]);
+                acc0a = Avx2.Add(acc0a, Avx2.MultiplyAddAdjacent(diff0, diff0));
+                acc1a = Avx2.Add(acc1a, Avx2.MultiplyAddAdjacent(diff1, diff1));
+
+                if (kp + 1 < earlyExitDimPairs)
+                {
+                    var v0b = Avx2.LoadVector256(blockPtr0 + (kp + 1) * 16).AsInt16();
+                    var v1b = Avx2.LoadVector256(blockPtr0 + blockShorts + (kp + 1) * 16).AsInt16();
+                    var diff0b = Avx2.Subtract(v0b, qBroadcast[kp + 1]);
+                    var diff1b = Avx2.Subtract(v1b, qBroadcast[kp + 1]);
+                    acc0b = Avx2.Add(acc0b, Avx2.MultiplyAddAdjacent(diff0b, diff0b));
+                    acc1b = Avx2.Add(acc1b, Avx2.MultiplyAddAdjacent(diff1b, diff1b));
+                }
+            }
+
+            // Merge dual accumulators
+            Vector256<int> partial0 = Avx2.Add(acc0a, acc0b);
+            Vector256<int> partial1 = Avx2.Add(acc1a, acc1b);
 
             int worst = (heapSize == k) ? heapDist[0] : int.MaxValue;
             var threshold = Vector256.Create(worst);
@@ -630,11 +702,17 @@ public sealed unsafe class IvfDetector : IFraudDetector
             if (passMask0 != 0)
             {
                 Vector256<int> full0 = partial0;
-                for (int kp = earlyExitDimPairs; kp < dimPairs; kp++)
+                for (int kp = earlyExitDimPairs; kp < dimPairs; kp += 2)
                 {
                     var v0 = Avx2.LoadVector256(blockPtr0 + kp * 16).AsInt16();
                     var diff0 = Avx2.Subtract(v0, qBroadcast[kp]);
                     full0 = Avx2.Add(full0, Avx2.MultiplyAddAdjacent(diff0, diff0));
+                    if (kp + 1 < dimPairs)
+                    {
+                        var v0b = Avx2.LoadVector256(blockPtr0 + (kp + 1) * 16).AsInt16();
+                        var diff0b = Avx2.Subtract(v0b, qBroadcast[kp + 1]);
+                        full0 = Avx2.Add(full0, Avx2.MultiplyAddAdjacent(diff0b, diff0b));
+                    }
                 }
                 full0.CopyTo(dists);
 
@@ -655,11 +733,17 @@ public sealed unsafe class IvfDetector : IFraudDetector
             if (passMask1 != 0)
             {
                 Vector256<int> full1 = partial1;
-                for (int kp = earlyExitDimPairs; kp < dimPairs; kp++)
+                for (int kp = earlyExitDimPairs; kp < dimPairs; kp += 2)
                 {
                     var v1 = Avx2.LoadVector256(blockPtr0 + blockShorts + kp * 16).AsInt16();
                     var diff1 = Avx2.Subtract(v1, qBroadcast[kp]);
                     full1 = Avx2.Add(full1, Avx2.MultiplyAddAdjacent(diff1, diff1));
+                    if (kp + 1 < dimPairs)
+                    {
+                        var v1b = Avx2.LoadVector256(blockPtr0 + blockShorts + (kp + 1) * 16).AsInt16();
+                        var diff1b = Avx2.Subtract(v1b, qBroadcast[kp + 1]);
+                        full1 = Avx2.Add(full1, Avx2.MultiplyAddAdjacent(diff1b, diff1b));
+                    }
                 }
                 full1.CopyTo(dists);
 
@@ -685,13 +769,21 @@ public sealed unsafe class IvfDetector : IFraudDetector
             int validLanes = count - b * bv;
             if (validLanes > bv) validLanes = bv;
 
-            Vector256<int> partial = Vector256<int>.Zero;
-            for (int kp = 0; kp < earlyExitDimPairs; kp++)
+            Vector256<int> accA = Vector256<int>.Zero;
+            Vector256<int> accB = Vector256<int>.Zero;
+            for (int kp = 0; kp < earlyExitDimPairs; kp += 2)
             {
                 var v = Avx2.LoadVector256(blockPtr + kp * 16).AsInt16();
                 var diff = Avx2.Subtract(v, qBroadcast[kp]);
-                partial = Avx2.Add(partial, Avx2.MultiplyAddAdjacent(diff, diff));
+                accA = Avx2.Add(accA, Avx2.MultiplyAddAdjacent(diff, diff));
+                if (kp + 1 < earlyExitDimPairs)
+                {
+                    var vb = Avx2.LoadVector256(blockPtr + (kp + 1) * 16).AsInt16();
+                    var diffb = Avx2.Subtract(vb, qBroadcast[kp + 1]);
+                    accB = Avx2.Add(accB, Avx2.MultiplyAddAdjacent(diffb, diffb));
+                }
             }
+            Vector256<int> partial = Avx2.Add(accA, accB);
 
             int worst = (heapSize == k) ? heapDist[0] : int.MaxValue;
             var threshold = Vector256.Create(worst);
@@ -703,11 +795,17 @@ public sealed unsafe class IvfDetector : IFraudDetector
             if (passMask != 0)
             {
                 Vector256<int> full = partial;
-                for (int kp = earlyExitDimPairs; kp < dimPairs; kp++)
+                for (int kp = earlyExitDimPairs; kp < dimPairs; kp += 2)
                 {
                     var v = Avx2.LoadVector256(blockPtr + kp * 16).AsInt16();
                     var diff = Avx2.Subtract(v, qBroadcast[kp]);
                     full = Avx2.Add(full, Avx2.MultiplyAddAdjacent(diff, diff));
+                    if (kp + 1 < dimPairs)
+                    {
+                        var vb = Avx2.LoadVector256(blockPtr + (kp + 1) * 16).AsInt16();
+                        var diffb = Avx2.Subtract(vb, qBroadcast[kp + 1]);
+                        full = Avx2.Add(full, Avx2.MultiplyAddAdjacent(diffb, diffb));
+                    }
                 }
                 full.CopyTo(dists);
 
