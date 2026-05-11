@@ -44,7 +44,6 @@ services:
     environment:
       - SOCKET_PATH=/run/sock/api1.sock
       - NPROBE_FULL=5
-      - IO_URING_ENABLED=1
       - UNANIMITY_SKIP=1
       - EARLY_EXIT_DIMS=3
       - PROFILE_MIN_COUNT=15
@@ -67,7 +66,6 @@ services:
     environment:
       - SOCKET_PATH=/run/sock/api2.sock
       - NPROBE_FULL=5
-      - IO_URING_ENABLED=1
       - UNANIMITY_SKIP=1
       - EARLY_EXIT_DIMS=3
       - PROFILE_MIN_COUNT=15
