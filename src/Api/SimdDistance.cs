@@ -253,6 +253,84 @@ public static class SimdDistance
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static unsafe int SByteBboxLowerBound(short* query, sbyte* bboxMin, sbyte* bboxMax)
+    {
+        if (Avx2.IsSupported)
+        {
+            var q = Avx2.LoadVector256(query);
+            var bMin = Avx2.ConvertToVector256Int16(Sse2.LoadVector128((byte*)bboxMin).AsSByte());
+            var bMax = Avx2.ConvertToVector256Int16(Sse2.LoadVector128((byte*)bboxMax).AsSByte());
+
+            var lo = Avx2.Max(Avx2.Subtract(bMin, q), Vector256<short>.Zero);
+            var hi = Avx2.Max(Avx2.Subtract(q, bMax), Vector256<short>.Zero);
+            var gap = Avx2.Add(lo, hi);
+
+            var madd = Avx2.MultiplyAddAdjacent(gap, gap);
+            var h128 = Avx2.ExtractVector128(madd, 1);
+            var l128 = madd.GetLower();
+            var s = Sse2.Add(h128, l128);
+            s = Sse2.Add(s, Sse2.Shuffle(s, 0x4E));
+            s = Sse2.Add(s, Sse2.Shuffle(s, 0xB1));
+            return s.GetElement(0);
+        }
+
+        int lb = 0;
+        for (int d = 0; d < 16; d++)
+        {
+            int gap = 0;
+            if (query[d] < bboxMin[d]) gap = bboxMin[d] - (int)query[d];
+            else if (query[d] > bboxMax[d]) gap = (int)query[d] - bboxMax[d];
+            lb += gap * gap;
+        }
+        return lb;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static unsafe void SByteL2SquaredAllDimMajor(
+        short* qInt, sbyte* centroidsT, int* outDists, int K, int pd)
+    {
+        if (Avx2.IsSupported)
+        {
+            var zero = Vector256<int>.Zero;
+            for (int c = 0; c < K; c += 8)
+                Avx.Store(outDists + c, zero);
+
+            int dimPairs = pd / 2;
+            for (int dp = 0; dp < dimPairs; dp++)
+            {
+                int qPairVal = ((ushort)qInt[dp * 2]) | ((ushort)qInt[dp * 2 + 1] << 16);
+                var qPair = Vector256.Create(qPairVal).AsInt16();
+                sbyte* pairBase = centroidsT + (long)dp * K * 2;
+
+                for (int c = 0; c < K; c += 8)
+                {
+                    var rawBytes = Sse2.LoadVector128(pairBase + c * 2);
+                    var cents = Avx2.ConvertToVector256Int16(rawBytes.AsSByte());
+                    var diff = Avx2.Subtract(cents, qPair);
+                    var madd = Avx2.MultiplyAddAdjacent(diff, diff);
+                    var acc = Avx.LoadVector256(outDists + c);
+                    Avx.Store(outDists + c, Avx2.Add(acc, madd));
+                }
+            }
+            return;
+        }
+
+        int scalarDimPairs = pd / 2;
+        for (int c = 0; c < K; c++)
+        {
+            int sum = 0;
+            for (int dp = 0; dp < scalarDimPairs; dp++)
+            {
+                long pairOff = (long)dp * K * 2 + c * 2;
+                int d0 = centroidsT[pairOff]     - qInt[dp * 2];
+                int d1 = centroidsT[pairOff + 1] - qInt[dp * 2 + 1];
+                sum += d0 * d0 + d1 * d1;
+            }
+            outDists[c] = sum;
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static unsafe void Prefetch(void* ptr)
     {
         if (Sse.IsSupported)

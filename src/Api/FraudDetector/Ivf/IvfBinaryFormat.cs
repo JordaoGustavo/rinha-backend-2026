@@ -5,15 +5,18 @@ namespace Rinha.Api;
 public static class IvfBinaryFormat
 {
     public static ReadOnlySpan<byte> Magic => "IVFR"u8;
-    public const uint Version = 9;
+    public const uint Version = 10;
     public const int HeaderSize = 64;
     public const int Dims = 14;
     public const int PaddedDims = 16;
     public const int Scale = 4096;
+    public const int Int8Scale = 128;
+    public const int Int16ToInt8Shift = 5; // 4096 / 128 = 32 = 2^5
     public const int BlockVectors = 8;
-    public const int BlockBytes = BlockVectors * PaddedDims * sizeof(short);
+    public const int BlockBytes = BlockVectors * PaddedDims * sizeof(sbyte);
     public const int CentroidVectorBytes = PaddedDims * sizeof(short);
     public const int Int16VectorBytes = PaddedDims * sizeof(short);
+    public const int Int8VectorBytes = PaddedDims * sizeof(sbyte);
     // v8: per-cluster radius (uint, ceil(sqrt(max int16-squared centroid→vec
     // distance))). Used by pass-2 triangle-inequality skip before bbox-LB.
     public const int ClusterRadiusBytes = sizeof(uint);
@@ -55,7 +58,7 @@ public static class IvfBinaryFormat
         ClusterMetaOffset(numClusters) + (long)numClusters * 8;
 
     public static long LabelsOffset(int numClusters, int totalVectorSlots) =>
-        VectorsOffset(numClusters) + (long)totalVectorSlots * Int16VectorBytes;
+        VectorsOffset(numClusters) + (long)totalVectorSlots * Int8VectorBytes;
 
     // Original global indices: int32 per slot, stored after labels
     public static long OriginalIndicesOffset(int numClusters, int totalVectorSlots) =>
