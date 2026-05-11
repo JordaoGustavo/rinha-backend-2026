@@ -42,6 +42,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
     private readonly ushort* _profileCount;
     private readonly bool _profileEnabled;
     private readonly int _profileMinCount;
+    private readonly bool _unanimitySkip;
 
     public int NumVectors { get; }
     public int NumClusters { get; }
@@ -117,6 +118,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
         _profileEnabled = (Environment.GetEnvironmentVariable("PROFILE_FAST_PATH") ?? "1") != "0";
         _profileMinCount = int.TryParse(Environment.GetEnvironmentVariable("PROFILE_MIN_COUNT"), out var pmc) && pmc > 0
             ? pmc : 30;
+        _unanimitySkip = Environment.GetEnvironmentVariable("UNANIMITY_SKIP") == "1";
     }
 
     public static IvfDetector Open(string path)
@@ -423,6 +425,22 @@ public sealed unsafe class IvfDetector : IFraudDetector
         long t2 = ticksOut != null ? Stopwatch.GetTimestamp() : 0;
         if (ticksOut != null) ticksOut[1] = t2 - t1;
 
+        // Unanimity early exit: if all K candidates from the initial probe
+        // share the same label, skip the expensive bbox repair pass. The
+        // decision (approved/denied) cannot change regardless of what the
+        // repair pass might find. Toggle via UNANIMITY_SKIP=1.
+        if (_unanimitySkip && useBboxRepair && probeCount < numClusters && heapSize == k)
+        {
+            int fc = 0;
+            for (int i = 0; i < heapSize; i++)
+                fc += _labels[heapIdx[i]];
+            if (fc == 0 || fc == heapSize)
+            {
+                if (ticksOut != null) ticksOut[2] = 0;
+                goto extractResults;
+            }
+        }
+
         if (useBboxRepair && probeCount < numClusters)
         {
             Pass2InvocationsForTest++;
@@ -547,6 +565,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
 
         if (ticksOut != null) ticksOut[2] = Stopwatch.GetTimestamp() - t2;
 
+    extractResults:
         int resultCount = heapSize;
         for (int i = heapSize - 1; i >= 0; i--)
         {
