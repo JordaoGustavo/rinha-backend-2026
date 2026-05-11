@@ -13,11 +13,6 @@ public sealed unsafe class IvfDetector : IFraudDetector
     private readonly MemoryMappedViewAccessor _accessor;
     private readonly byte* _basePtr;
 
-    // Optional exact float32 reranking data (from exact.bin mmap)
-    private readonly MemoryMappedFile? _exactMmf;
-    private readonly MemoryMappedViewAccessor? _exactAccessor;
-    private readonly float* _exactVectors; // null if not loaded
-
     private readonly short* _centroids;
     // Centróides em layout dim-major (`_centroidsT[d * K + c]`) alocados em
     // heap unmanaged. Pré-computado em Open() a partir do mmap K-major.
@@ -32,7 +27,6 @@ public sealed unsafe class IvfDetector : IFraudDetector
     private readonly IvfBinaryFormat.ClusterMeta* _clusterMeta;
     private readonly short* _vectors;
     private readonly byte* _labels;
-    private readonly int* _originalIndices; // slot → original global index in exact.bin
 
     // v9: profile fast path. _profileMask[k] = 0|1|2|3 (legit/fraud/mixed
     // bitset), _profileCount[k] = ushort training-sample count. Habilitado
@@ -49,7 +43,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
     public int TotalSlots { get; }
     public int NprobeFast { get; }
     public int NprobeFull { get; }
-    public string Description => $"IVF v9 SoA-block {NumClusters} clusters, int16 centroids+vectors+radius + f32-rerank + profile-fastpath(min={_profileMinCount},enabled={_profileEnabled}), nprobe={NprobeFull}";
+    public string Description => $"IVF v9 SoA-block {NumClusters} clusters, int16 centroids+vectors+radius + deq-rerank + profile-fastpath(min={_profileMinCount},enabled={_profileEnabled}), nprobe={NprobeFull}";
 
     /// <summary>
     /// Counter usado em testes/diagnóstico. Incrementado cada vez que
@@ -85,15 +79,11 @@ public sealed unsafe class IvfDetector : IFraudDetector
     }
 
     private IvfDetector(MemoryMappedFile mmf, MemoryMappedViewAccessor accessor, byte* basePtr,
-        int numVectors, int numClusters, int totalSlots, int nprobeFast, int nprobeFull,
-        MemoryMappedFile? exactMmf = null, MemoryMappedViewAccessor? exactAccessor = null, float* exactVectors = null)
+        int numVectors, int numClusters, int totalSlots, int nprobeFast, int nprobeFull)
     {
         _mmf = mmf;
         _accessor = accessor;
         _basePtr = basePtr;
-        _exactMmf = exactMmf;
-        _exactAccessor = exactAccessor;
-        _exactVectors = exactVectors;
         NumVectors = numVectors;
         NumClusters = numClusters;
         TotalSlots = totalSlots;
@@ -111,7 +101,6 @@ public sealed unsafe class IvfDetector : IFraudDetector
         _clusterMeta = (IvfBinaryFormat.ClusterMeta*)(_basePtr + IvfBinaryFormat.ClusterMetaOffset(numClusters));
         _vectors = (short*)(_basePtr + IvfBinaryFormat.VectorsOffset(numClusters));
         _labels = _basePtr + IvfBinaryFormat.LabelsOffset(numClusters, totalSlots);
-        _originalIndices = (int*)(_basePtr + IvfBinaryFormat.OriginalIndicesOffset(numClusters, totalSlots));
         _profileMask = _basePtr + IvfBinaryFormat.ProfileMaskOffset(numClusters, totalSlots);
         _profileCount = (ushort*)(_basePtr + IvfBinaryFormat.ProfileCountOffset(numClusters, totalSlots));
 
@@ -141,56 +130,13 @@ public sealed unsafe class IvfDetector : IFraudDetector
         return new IvfDetector(mmf, accessor, ptr, numVectors, numClusters, totalSlots, nprobeFast, nprobeFull);
     }
 
-    /// <summary>
-    /// Opens the IVF index with an additional exact float32 reference for true-float32 reranking.
-    /// Achieves 100% agreement with the ExactDetector reference implementation.
-    /// </summary>
-    public static IvfDetector OpenWithExactRerank(string ivfPath, string exactPath)
-    {
-        var mmf = MemoryMappedFile.CreateFromFile(ivfPath, FileMode.Open, null, 0, MemoryMappedFileAccess.Read);
-        var accessor = mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
-        byte* ptr = null;
-        accessor.SafeMemoryMappedViewHandle.AcquirePointer(ref ptr);
-
-        uint version = *(uint*)(ptr + 4);
-        if (version != IvfBinaryFormat.Version)
-            throw new InvalidDataException($"Unsupported IVFR version: {version} (expected {IvfBinaryFormat.Version}). Re-run preprocess.");
-
-        int numVectors  = (int)*(uint*)(ptr + 8);
-        int numClusters = (int)*(uint*)(ptr + 12);
-        int nprobeFast  = (int)*(uint*)(ptr + 24);
-        int nprobeFull  = (int)*(uint*)(ptr + 28);
-        int totalSlots  = (int)*(uint*)(ptr + 36);
-
-        var exactMmf = MemoryMappedFile.CreateFromFile(exactPath, FileMode.Open, null, 0, MemoryMappedFileAccess.Read);
-        var exactAccessor = exactMmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
-        byte* exactPtr = null;
-        exactAccessor.SafeMemoryMappedViewHandle.AcquirePointer(ref exactPtr);
-        float* exactVectors = (float*)(exactPtr + ExactBinaryFormat.VectorsOffset);
-
-        return new IvfDetector(mmf, accessor, ptr, numVectors, numClusters, totalSlots, nprobeFast, nprobeFull,
-                               exactMmf, exactAccessor, exactVectors);
-    }
-
     public void Prefault()
     {
         long totalSize = IvfBinaryFormat.TotalSize(NumClusters, TotalSlots);
-        // Linux-only mmap hints. Hugepages compress the IVF index (~110 MB,
-        // ~28 k 4 KB pages) into ~55 2 MB pages — fits entirely in the Haswell
-        // L1 dTLB (64 entries). WillNeed kicks readahead before the prefault
-        // touch loop. Both are no-ops on macOS / non-Linux hosts.
         MmapHints.HintHugePages(_basePtr, totalSize);
         MmapHints.HintWillNeed(_basePtr, totalSize);
         for (long i = 0; i < totalSize; i += 4096)
             _ = _basePtr[i];
-
-        if (_exactVectors != null)
-        {
-            const int pd = IvfBinaryFormat.PaddedDims;
-            long exactBytes = (long)NumVectors * pd * sizeof(float);
-            byte* exactBase = (byte*)_exactVectors;
-            MmapHints.HintRandom(exactBase, exactBytes);
-        }
     }
 
     /// <summary>
@@ -223,13 +169,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
     {
         const int pd = IvfBinaryFormat.PaddedDims;
         const int scale = IvfBinaryFormat.Scale;
-        // rerankN sweep (10 k synthetic queries, seed=195842629, NPROBE_FULL=5):
-        //   32 → 0.193 ms, 100% agreement (was the prior baseline)
-        //    8 → 0.141 ms, 100% agreement
-        //    7 → 0.135 ms, 100% agreement
-        //    6 → 0.132 ms, 100% agreement (chosen — minimum buffer that holds)
-        //    5 → 0.263 ms, 99.81% (10 FP + 9 FN — no buffer = recall fails)
-        const int rerankN = 6;
+        const int rerankN = 8;
 
         short* qInt = stackalloc short[pd];
         for (int d = 0; d < pd; d++)
@@ -280,61 +220,49 @@ public sealed unsafe class IvfDetector : IFraudDetector
 
             long s2Start = ticksOut != null ? Stopwatch.GetTimestamp() : 0;
 
-            float* exactVecs = _exactVectors;
-
-            if (exactVecs != null)
+            const float invScale = 1.0f / scale;
+            int topSize = 0;
+            for (int i = 0; i < candidateCount; i++)
             {
-                // Float32 rerank using exact.bin — original float32 vectors
-                // give genuine higher precision than dequantized int16.
-                int* origIdx = _originalIndices;
-                int topSize = 0;
-                for (int i = 0; i < candidateCount; i++)
+                int vecIdx = candidateIdx[i];
+                short* vec = _vectors + (long)vecIdx * pd;
+                float dist = 0;
+                for (int d = 0; d < 14; d++)
                 {
-                    int vecIdx = candidateIdx[i];
-                    int origGlobalIdx = origIdx[vecIdx];
-                    float dist = SimdDistance.EuclideanSquaredPtr(qFloat, exactVecs + (long)origGlobalIdx * pd);
-
-                    if (topSize < 5)
-                    {
-                        int p = topSize - 1;
-                        while (p >= 0 && topDist[p] > dist)
-                        {
-                            topDist[p + 1] = topDist[p];
-                            topIdx[p + 1]  = topIdx[p];
-                            p--;
-                        }
-                        topDist[p + 1] = dist;
-                        topIdx[p + 1]  = vecIdx;
-                        topSize++;
-                    }
-                    else if (dist < topDist[4])
-                    {
-                        int p = 3;
-                        while (p >= 0 && topDist[p] > dist)
-                        {
-                            topDist[p + 1] = topDist[p];
-                            topIdx[p + 1]  = topIdx[p];
-                            p--;
-                        }
-                        topDist[p + 1] = dist;
-                        topIdx[p + 1]  = vecIdx;
-                    }
+                    float diff = qFloat[d] - vec[d] * invScale;
+                    dist += diff * diff;
                 }
 
-                fraudCount = 0;
-                for (int i = 0; i < topSize; i++)
-                    fraudCount += _labels[topIdx[i]];
+                if (topSize < 5)
+                {
+                    int p = topSize - 1;
+                    while (p >= 0 && topDist[p] > dist)
+                    {
+                        topDist[p + 1] = topDist[p];
+                        topIdx[p + 1]  = topIdx[p];
+                        p--;
+                    }
+                    topDist[p + 1] = dist;
+                    topIdx[p + 1]  = vecIdx;
+                    topSize++;
+                }
+                else if (dist < topDist[4])
+                {
+                    int p = 3;
+                    while (p >= 0 && topDist[p] > dist)
+                    {
+                        topDist[p + 1] = topDist[p];
+                        topIdx[p + 1]  = topIdx[p];
+                        p--;
+                    }
+                    topDist[p + 1] = dist;
+                    topIdx[p + 1]  = vecIdx;
+                }
             }
-            else
-            {
-                // Int16 ranking is monotonically equivalent to dequantized
-                // float32 (dividing by scale² preserves order). Skip the
-                // float-domain recompute and random mmap reads entirely.
-                int topK = Math.Min(candidateCount, 5);
-                fraudCount = 0;
-                for (int i = 0; i < topK; i++)
-                    fraudCount += _labels[candidateIdx[i]];
-            }
+
+            fraudCount = 0;
+            for (int i = 0; i < topSize; i++)
+                fraudCount += _labels[topIdx[i]];
 
             if (ticksOut != null)
                 ticksOut[3] = Stopwatch.GetTimestamp() - s2Start;
@@ -943,9 +871,6 @@ public sealed unsafe class IvfDetector : IFraudDetector
     {
         if (_centroidsT != null)
             System.Runtime.InteropServices.NativeMemory.AlignedFree(_centroidsT);
-        _exactAccessor?.SafeMemoryMappedViewHandle.ReleasePointer();
-        _exactAccessor?.Dispose();
-        _exactMmf?.Dispose();
         _accessor.SafeMemoryMappedViewHandle.ReleasePointer();
         _accessor.Dispose();
         _mmf.Dispose();
