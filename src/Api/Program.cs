@@ -2,6 +2,8 @@ using System.Diagnostics;
 using System.IO.Pipelines;
 using System.Runtime;
 using System.Text;
+using Kestrel.Transport.IoUring;
+using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Rinha.Api;
 
 // Suppress Gen2 collections during request handling. With zero-alloc hot path
@@ -115,20 +117,36 @@ var responses = ResponseCache.Build();
 
 var builder = WebApplication.CreateSlimBuilder(args);
 builder.Logging.ClearProviders();
+
+if (Environment.GetEnvironmentVariable("IO_URING_ENABLED") == "1")
+{
+    builder.WebHost.UseIoUring(opts =>
+    {
+        opts.RingSize = int.TryParse(Environment.GetEnvironmentVariable("IO_URING_SIZE"), out var rs) && rs > 0 ? rs : 256;
+        opts.MaxConnections = int.TryParse(Environment.GetEnvironmentVariable("IO_URING_MAX_CONN"), out var mc) && mc > 0 ? mc : 1024;
+    });
+    Console.WriteLine("io_uring transport enabled");
+}
+
 builder.WebHost.ConfigureKestrel(options =>
 {
     options.AddServerHeader = false;
     options.Limits.MinRequestBodyDataRate = null;
     options.Limits.MinResponseDataRate = null;
+    options.Limits.MaxRequestBodySize = 8 * 1024;
+    options.Limits.MaxRequestHeadersTotalSize = 4 * 1024;
+    options.Limits.MaxConcurrentUpgradedConnections = 0;
+    options.Limits.KeepAliveTimeout = TimeSpan.FromMinutes(5);
+    options.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(5);
 
     if (!string.IsNullOrEmpty(socketPath))
     {
         if (File.Exists(socketPath)) File.Delete(socketPath);
-        options.ListenUnixSocket(socketPath);
+        options.ListenUnixSocket(socketPath, lo => lo.Protocols = HttpProtocols.Http1);
     }
     else
     {
-        options.ListenAnyIP(int.Parse(port));
+        options.ListenAnyIP(int.Parse(port), lo => lo.Protocols = HttpProtocols.Http1);
     }
 });
 
@@ -202,8 +220,10 @@ app.Run(async (HttpContext ctx) =>
             (approved, fraudCount) = ProcessRequest(detector, body.FirstSpan);
         }
         var responseBody = responses.Get(approved, fraudCount);
+        ctx.Response.StatusCode = 200;
         ctx.Response.ContentLength = responseBody.Length;
         ctx.Response.ContentType = "application/json";
+        ctx.Response.Headers.Date = default;
         if (serverTimingEnabled && scoreTicks != null)
         {
             long total = Stopwatch.GetTimestamp() - tStart;

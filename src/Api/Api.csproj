@@ -17,8 +17,8 @@
     <OptimizationPreference>Speed</OptimizationPreference>
     <TieredCompilation>false</TieredCompilation>
     <PlatformTarget Condition="'$(RuntimeIdentifier)' == 'linux-x64'">x64</PlatformTarget>
-    <ServerGarbageCollection>true</ServerGarbageCollection>
-    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
     <DynamicAdaptationMode>0</DynamicAdaptationMode>
     <DebuggerSupport>false</DebuggerSupport>
     <EventSourceSupport>false</EventSourceSupport>
@@ -27,4 +27,7 @@
     <StackTraceSupport>false</StackTraceSupport>
     <UseSystemResourceKeys>true</UseSystemResourceKeys>
   </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Kestrel.Transport.IoUring" Version="2.2.2" />
+  </ItemGroup>
 </Project>
