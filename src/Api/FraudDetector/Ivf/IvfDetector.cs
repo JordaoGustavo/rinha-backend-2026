@@ -19,20 +19,15 @@ public sealed unsafe class IvfDetector : IFraudDetector
     private readonly float* _exactVectors; // null if not loaded
 
     private readonly short* _centroids;
-    // Centróides em layout dim-major (`_centroidsT[d * K + c]`) alocados em
-    // heap unmanaged. Pré-computado em Open() a partir do mmap K-major.
-    // Substitui a passagem K iterações × Int16L2Squared (com horizontal
-    // reduce por cluster) por uma passagem dim-major com K acumuladores
-    // int32 mantidos vector-form. Custo memória: K * pd * 2 = 128 KB (cabe
-    // no L2 256 KB Haswell).
-    private readonly short* _centroidsT;
-    private readonly short* _bboxMin;
-    private readonly short* _bboxMax;
-    private readonly uint* _clusterRadius; // v8: ceil(sqrt(max int16-sq dist)) per cluster
+    private readonly sbyte* _centroidsT8;
+    private readonly sbyte* _bboxMin8;
+    private readonly sbyte* _bboxMax8;
+    private readonly uint* _clusterRadius;
+    private readonly uint* _clusterRadius8;
     private readonly IvfBinaryFormat.ClusterMeta* _clusterMeta;
-    private readonly short* _vectors;
+    private readonly sbyte* _vectors;
     private readonly byte* _labels;
-    private readonly int* _originalIndices; // slot → original global index in exact.bin
+    private readonly int* _originalIndices;
 
     // v9: profile fast path. _profileMask[k] = 0|1|2|3 (legit/fraud/mixed
     // bitset), _profileCount[k] = ushort training-sample count. Habilitado
@@ -49,7 +44,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
     public int TotalSlots { get; }
     public int NprobeFast { get; }
     public int NprobeFull { get; }
-    public string Description => $"IVF v9 SoA-block {NumClusters} clusters, int16 centroids+vectors+radius + f32-rerank + profile-fastpath(min={_profileMinCount},enabled={_profileEnabled}), nprobe={NprobeFull}";
+    public string Description => $"IVF v10 SoA-block {NumClusters} clusters, int8 vectors + int8 centroids scan + profile-fastpath(min={_profileMinCount},enabled={_profileEnabled}), nprobe={NprobeFull}";
 
     /// <summary>
     /// Counter usado em testes/diagnóstico. Incrementado cada vez que
@@ -104,12 +99,15 @@ public sealed unsafe class IvfDetector : IFraudDetector
         NprobeFull = envFull > 0 ? envFull : nprobeFull;
 
         _centroids = (short*)(_basePtr + IvfBinaryFormat.CentroidsOffset);
-        _centroidsT = AllocAndTransposeCentroids(_centroids, numClusters, IvfBinaryFormat.PaddedDims);
-        _bboxMin = (short*)(_basePtr + IvfBinaryFormat.BboxMinOffset(numClusters));
-        _bboxMax = (short*)(_basePtr + IvfBinaryFormat.BboxMaxOffset(numClusters));
+        _centroidsT8 = AllocAndTransposeCentroidsInt8(_centroids, numClusters, IvfBinaryFormat.PaddedDims);
+        short* bboxMin16 = (short*)(_basePtr + IvfBinaryFormat.BboxMinOffset(numClusters));
+        short* bboxMax16 = (short*)(_basePtr + IvfBinaryFormat.BboxMaxOffset(numClusters));
+        _bboxMin8 = AllocConvertInt16ToInt8(bboxMin16, numClusters * IvfBinaryFormat.PaddedDims);
+        _bboxMax8 = AllocConvertInt16ToInt8(bboxMax16, numClusters * IvfBinaryFormat.PaddedDims);
         _clusterRadius = (uint*)(_basePtr + IvfBinaryFormat.ClusterRadiusOffset(numClusters));
+        _clusterRadius8 = AllocScaleRadius(_clusterRadius, numClusters);
         _clusterMeta = (IvfBinaryFormat.ClusterMeta*)(_basePtr + IvfBinaryFormat.ClusterMetaOffset(numClusters));
-        _vectors = (short*)(_basePtr + IvfBinaryFormat.VectorsOffset(numClusters));
+        _vectors = (sbyte*)(_basePtr + IvfBinaryFormat.VectorsOffset(numClusters));
         _labels = _basePtr + IvfBinaryFormat.LabelsOffset(numClusters, totalSlots);
         _originalIndices = (int*)(_basePtr + IvfBinaryFormat.OriginalIndicesOffset(numClusters, totalSlots));
         _profileMask = _basePtr + IvfBinaryFormat.ProfileMaskOffset(numClusters, totalSlots);
@@ -213,8 +211,8 @@ public sealed unsafe class IvfDetector : IFraudDetector
     /// </summary>
     public const int CountersCount = 3;
 
-    public (bool Approved, int FraudCount) Score(ReadOnlySpan<float> query)
-        => ScoreCore(query, ticksOut: null, countsOut: null);
+    public (bool Approved, int FraudCount) Score(ReadOnlySpan<float> query) =>
+        ScoreCore(query, ticksOut: null, countsOut: null);
 
     /// <summary>
     /// Dev-only path. Same algorithm as <see cref="Score"/>, but writes
@@ -230,31 +228,22 @@ public sealed unsafe class IvfDetector : IFraudDetector
     {
         const int pd = IvfBinaryFormat.PaddedDims;
         const int scale = IvfBinaryFormat.Scale;
-        // rerankN sweep (10 k synthetic queries, seed=195842629, NPROBE_FULL=5):
-        //   32 → 0.193 ms, 100% agreement (was the prior baseline)
-        //    8 → 0.141 ms, 100% agreement
-        //    7 → 0.135 ms, 100% agreement
-        //    6 → 0.132 ms, 100% agreement (chosen — minimum buffer that holds)
-        //    5 → 0.263 ms, 99.81% (10 FP + 9 FN — no buffer = recall fails)
+        const int int8Scale = IvfBinaryFormat.Int8Scale;
         const int rerankN = 6;
 
-        short* qInt = stackalloc short[pd];
+        // int16-scale query for profile fast path (uses Scale=4096 thresholds)
+        short* qInt16 = stackalloc short[pd];
         for (int d = 0; d < pd; d++)
         {
             float v = MathF.Round(query[d] * scale);
-            if (v > short.MaxValue) qInt[d] = short.MaxValue;
-            else if (v < short.MinValue) qInt[d] = short.MinValue;
-            else qInt[d] = (short)v;
+            if (v > short.MaxValue) qInt16[d] = short.MaxValue;
+            else if (v < short.MinValue) qInt16[d] = short.MinValue;
+            else qInt16[d] = (short)v;
         }
 
-        // Profile fast path: bucket monocromático com count >= threshold
-        // devolve a resposta sem tocar no IVF. Atalho de ~50 ns vs ~1 ms
-        // do IVF completo. ticksOut == null evita overhead do timing
-        // path; ticks dos estágios IVF ficam zerados quando o atalho
-        // dispara, indicando "fast-path hit" no Server-Timing.
         if (_profileEnabled && ticksOut == null)
         {
-            int pkey = ProfileFastPath.Key(qInt);
+            int pkey = ProfileFastPath.Key(qInt16);
             byte pmask = _profileMask[pkey];
             if (pmask == IvfBinaryFormat.ProfileLegitMask
                 && _profileCount[pkey] >= _profileMinCount)
@@ -271,86 +260,39 @@ public sealed unsafe class IvfDetector : IFraudDetector
             ProfileFastPathMisses++;
         }
 
+        // int8-scale query for IVF search (all distances in int8² space)
+        short* qInt8 = stackalloc short[pd];
+        for (int d = 0; d < pd; d++)
+        {
+            float v = MathF.Round(query[d] * int8Scale);
+            if (v > 127) qInt8[d] = 127;
+            else if (v < -128) qInt8[d] = -128;
+            else qInt8[d] = (short)v;
+        }
+
         int* qPairs = stackalloc int[pd / 2];
         for (int kp = 0; kp < pd / 2; kp++)
-            qPairs[kp] = ((ushort)qInt[2 * kp]) | ((ushort)qInt[2 * kp + 1] << 16);
+            qPairs[kp] = ((ushort)qInt8[2 * kp]) | ((ushort)qInt8[2 * kp + 1] << 16);
 
-        Span<int>   candidateIdx = stackalloc int[rerankN];
-        Span<int>   topIdx       = stackalloc int[5];
-        Span<float> topDist      = stackalloc float[5];
+        Span<int> candidateIdx = stackalloc int[rerankN];
 
-        int fraudCount;
-        fixed (float* qFloat = query)
-        {
-            int candidateCount = FindKNearest(qFloat, qInt, qPairs, rerankN, candidateIdx,
-                                              NprobeFull, useBboxRepair: true, ticksOut, countsOut);
+        int candidateCount = FindKNearest(qInt8, qPairs, rerankN, candidateIdx,
+                                          NprobeFull, useBboxRepair: true, ticksOut, countsOut);
 
-            long s2Start = ticksOut != null ? Stopwatch.GetTimestamp() : 0;
+        long s2Start = ticksOut != null ? Stopwatch.GetTimestamp() : 0;
 
-            float* exactVecs = _exactVectors;
+        int topK = Math.Min(candidateCount, 5);
+        int fraudCount = 0;
+        for (int i = 0; i < topK; i++)
+            fraudCount += _labels[candidateIdx[i]];
 
-            if (exactVecs != null)
-            {
-                // Float32 rerank using exact.bin — original float32 vectors
-                // give genuine higher precision than dequantized int16.
-                int* origIdx = _originalIndices;
-                int topSize = 0;
-                for (int i = 0; i < candidateCount; i++)
-                {
-                    int vecIdx = candidateIdx[i];
-                    int origGlobalIdx = origIdx[vecIdx];
-                    float dist = SimdDistance.EuclideanSquaredPtr(qFloat, exactVecs + (long)origGlobalIdx * pd);
-
-                    if (topSize < 5)
-                    {
-                        int p = topSize - 1;
-                        while (p >= 0 && topDist[p] > dist)
-                        {
-                            topDist[p + 1] = topDist[p];
-                            topIdx[p + 1]  = topIdx[p];
-                            p--;
-                        }
-                        topDist[p + 1] = dist;
-                        topIdx[p + 1]  = vecIdx;
-                        topSize++;
-                    }
-                    else if (dist < topDist[4])
-                    {
-                        int p = 3;
-                        while (p >= 0 && topDist[p] > dist)
-                        {
-                            topDist[p + 1] = topDist[p];
-                            topIdx[p + 1]  = topIdx[p];
-                            p--;
-                        }
-                        topDist[p + 1] = dist;
-                        topIdx[p + 1]  = vecIdx;
-                    }
-                }
-
-                fraudCount = 0;
-                for (int i = 0; i < topSize; i++)
-                    fraudCount += _labels[topIdx[i]];
-            }
-            else
-            {
-                // Int16 ranking is monotonically equivalent to dequantized
-                // float32 (dividing by scale² preserves order). Skip the
-                // float-domain recompute and random mmap reads entirely.
-                int topK = Math.Min(candidateCount, 5);
-                fraudCount = 0;
-                for (int i = 0; i < topK; i++)
-                    fraudCount += _labels[candidateIdx[i]];
-            }
-
-            if (ticksOut != null)
-                ticksOut[3] = Stopwatch.GetTimestamp() - s2Start;
-        }
+        if (ticksOut != null)
+            ticksOut[3] = Stopwatch.GetTimestamp() - s2Start;
 
         return (fraudCount < 3, fraudCount);
     }
 
-    private int FindKNearest(float* qFloat, short* qInt, int* qPairs, int k, Span<int> resultIdx,
+    private int FindKNearest(short* qInt8, int* qPairs, int k, Span<int> resultIdx,
         int nprobe, bool useBboxRepair, long* ticksOut = null, int* countsOut = null)
     {
         const int pd = IvfBinaryFormat.PaddedDims;
@@ -360,18 +302,11 @@ public sealed unsafe class IvfDetector : IFraudDetector
         int* probeList  = stackalloc int[actualNprobe];
         int* probeDists = stackalloc int[actualNprobe];
         int probeCount = 0;
-        // v8: cache the int16-squared centroid distance per cluster so the
-        // pass-2 triangle-inequality skip can reuse it without recomputing
-        // any SIMD work. 4096 clusters * 4 B = 16 KB on the call stack.
         int* centroidDist = stackalloc int[numClusters];
 
         long t0 = ticksOut != null ? Stopwatch.GetTimestamp() : 0;
 
-        // Compute all K centroid distances in a single dim-major SIMD pass.
-        // Substitui o loop K × Int16L2Squared (horizontal reduce por
-        // cluster). Working-set por dim = K * 2 = 8 KB, cabe em L1
-        // Haswell (32 KB). Padding dims [D..pd) zeros não contribuem.
-        SimdDistance.Int16L2SquaredAllDimMajor(qInt, _centroidsT, centroidDist, numClusters, pd);
+        SimdDistance.SByteL2SquaredAllDimMajor(qInt8, _centroidsT8, centroidDist, numClusters, pd);
 
         // Walk K distances and build the top-actualNprobe min-heap (by
         // largest at root, so a new smaller dist can replace root).
@@ -411,15 +346,12 @@ public sealed unsafe class IvfDetector : IFraudDetector
         for (int p = 0; p < probeCount; p++)
         {
             int cId = probeList[p];
-            // Once the K-heap is full, skip a probed cluster whose bbox lower
-            // bound already exceeds the worst-K. Saves a full ScanCluster
-            // (~3–5 µs) at the cost of a single SIMD lb compute (~50 ns).
             if (heapSize == k)
             {
-                int lb = SimdDistance.Int16BboxLowerBound(qInt, _bboxMin + cId * pd, _bboxMax + cId * pd);
+                int lb = SimdDistance.SByteBboxLowerBound(qInt8, _bboxMin8 + cId * pd, _bboxMax8 + cId * pd);
                 if (lb > heapDist[0]) continue;
             }
-            ScanCluster(qInt, qPairs, cId, heapIdx, heapDist, ref heapSize, k);
+            ScanCluster(qInt8, qPairs, cId, heapIdx, heapDist, ref heapSize, k);
         }
 
         long t2 = ticksOut != null ? Stopwatch.GetTimestamp() : 0;
@@ -468,7 +400,6 @@ public sealed unsafe class IvfDetector : IFraudDetector
             Vector256<long> vSqrtWorst = vEnabled ? Vector256.Create(sqrtWorstCeil) : Vector256<long>.Zero;
             const int Lanes = 4;
 
-            // Phase 1: triangle-only sweep — collect survivors
             for (int cBase = 0; cBase < numClusters; cBase += Lanes)
             {
                 int scannedMask = (int)((scannedBits[cBase >> 6] >> (cBase & 63)) & 0xF);
@@ -477,7 +408,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
                 if (vEnabled)
                 {
                     var cd128 = Sse2.LoadVector128(centroidDist + cBase);
-                    var rad128 = Sse2.LoadVector128((int*)(_clusterRadius + cBase));
+                    var rad128 = Sse2.LoadVector128((int*)(_clusterRadius8 + cBase));
                     var cdL = Avx2.ConvertToVector256Int64(cd128);
                     var radL = Avx2.ConvertToVector256Int64(rad128);
                     var threshL = Avx2.Add(radL, vSqrtWorst);
@@ -525,18 +456,14 @@ public sealed unsafe class IvfDetector : IFraudDetector
                 }
             }
 
-            // Phase 2: bbox check + scan in centroidDist order.
-            // Re-evaluate triangle bound as worstDist tightens — survivors
-            // collected with the initial (loose) sqrtWorst may now be prunable.
             for (int s = 0; s < survivorCount; s++)
             {
                 int c = survivorBuf[s];
 
-                // Re-check triangle with current (tighter) worstDist.
                 if (heapSize == k)
                 {
                     long sw = sqrtWorstCeil;
-                    long thresh = (long)_clusterRadius[c] + sw;
+                    long thresh = (long)_clusterRadius8[c] + sw;
                     if ((long)centroidDist[c] > thresh * thresh)
                     {
                         if (countsOut != null) countsOut[0]++;
@@ -544,11 +471,11 @@ public sealed unsafe class IvfDetector : IFraudDetector
                     }
                 }
 
-                int lb = SimdDistance.Int16BboxLowerBound(qInt, _bboxMin + c * pd, _bboxMax + c * pd);
+                int lb = SimdDistance.SByteBboxLowerBound(qInt8, _bboxMin8 + c * pd, _bboxMax8 + c * pd);
                 if (lb <= worstDist)
                 {
                     if (countsOut != null) countsOut[2]++;
-                    ScanCluster(qInt, qPairs, c, heapIdx, heapDist, ref heapSize, k);
+                    ScanCluster(qInt8, qPairs, c, heapIdx, heapDist, ref heapSize, k);
                     if (heapSize == k)
                     {
                         int newWorst = heapDist[0];
@@ -576,7 +503,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void ScanCluster(short* qInt, int* qPairs, int clusterId,
+    private void ScanCluster(short* qInt8, int* qPairs, int clusterId,
         int* heapIdx, int* heapDist, ref int heapSize, int k)
     {
         const int pd = IvfBinaryFormat.PaddedDims;
@@ -588,7 +515,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
         if (count == 0) return;
 
         int numBlocks = (count + bv - 1) / bv;
-        short* clusterVecBase = _vectors + offset * pd;
+        sbyte* clusterVecBase = _vectors + offset * pd;
 
         if (Avx2.IsSupported)
         {
@@ -596,21 +523,20 @@ public sealed unsafe class IvfDetector : IFraudDetector
         }
         else
         {
-            ScanClusterScalar(qInt, clusterVecBase, offset, count, numBlocks, heapIdx, heapDist, ref heapSize, k);
+            ScanClusterScalar(qInt8, clusterVecBase, offset, count, numBlocks, heapIdx, heapDist, ref heapSize, k);
         }
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void ScanClusterAvx2(int* qPairs, short* clusterVecBase, int offset, int count, int numBlocks,
+    private static void ScanClusterAvx2(int* qPairs, sbyte* clusterVecBase, int offset, int count, int numBlocks,
         int* heapIdx, int* heapDist, ref int heapSize, int k)
     {
         const int pd = IvfBinaryFormat.PaddedDims;
         const int bv = IvfBinaryFormat.BlockVectors;
-        const int blockShorts = pd * bv;
+        const int blockBytes = pd * bv;
         const int dimPairs = pd / 2;
         int earlyExitDimPairs = s_earlyExitDimPairs;
-        // Multi-level early exit: first checkpoint at half of earlyExitDimPairs
-        int earlyExit1 = earlyExitDimPairs >> 1; // e.g. 2 when earlyExitDimPairs=4
+        int earlyExit1 = earlyExitDimPairs >> 1;
 
         Span<Vector256<short>> qBroadcast = stackalloc Vector256<short>[dimPairs];
         for (int kp = 0; kp < dimPairs; kp++)
@@ -621,29 +547,25 @@ public sealed unsafe class IvfDetector : IFraudDetector
         int b = 0;
         for (; b + 1 < numBlocks; b += 2)
         {
-            short* blockPtr0 = clusterVecBase + b * blockShorts;
+            sbyte* blockPtr0 = clusterVecBase + b * blockBytes;
 
             if (b + 4 < numBlocks)
-                Sse.Prefetch0(clusterVecBase + (b + 4) * blockShorts);
+                Sse.Prefetch0(clusterVecBase + (b + 4) * blockBytes);
 
             int validLanes0 = count - b * bv;
             if (validLanes0 > bv) validLanes0 = bv;
             int validLanes1 = count - (b + 1) * bv;
             if (validLanes1 > bv) validLanes1 = bv;
 
-            // Dual-accumulator: break RAW dependency chain on partial accumulators.
-            // Two independent Add chains let Haswell issue MADD+Add on both ports
-            // in the same cycle instead of stalling on the single-chain latency.
             Vector256<int> acc0a = Vector256<int>.Zero;
             Vector256<int> acc0b = Vector256<int>.Zero;
             Vector256<int> acc1a = Vector256<int>.Zero;
             Vector256<int> acc1b = Vector256<int>.Zero;
 
-            // Phase 1: first earlyExit1 dim-pairs (ultra-early check)
             for (int kp = 0; kp < earlyExit1; kp += 2)
             {
-                var v0 = Avx2.LoadVector256(blockPtr0 + kp * 16).AsInt16();
-                var v1 = Avx2.LoadVector256(blockPtr0 + blockShorts + kp * 16).AsInt16();
+                var v0 = Avx2.ConvertToVector256Int16(Sse2.LoadVector128(blockPtr0 + kp * 16));
+                var v1 = Avx2.ConvertToVector256Int16(Sse2.LoadVector128(blockPtr0 + blockBytes + kp * 16));
                 var diff0 = Avx2.Subtract(v0, qBroadcast[kp]);
                 var diff1 = Avx2.Subtract(v1, qBroadcast[kp]);
                 acc0a = Avx2.Add(acc0a, Avx2.MultiplyAddAdjacent(diff0, diff0));
@@ -651,8 +573,8 @@ public sealed unsafe class IvfDetector : IFraudDetector
 
                 if (kp + 1 < earlyExit1)
                 {
-                    var v0b = Avx2.LoadVector256(blockPtr0 + (kp + 1) * 16).AsInt16();
-                    var v1b = Avx2.LoadVector256(blockPtr0 + blockShorts + (kp + 1) * 16).AsInt16();
+                    var v0b = Avx2.ConvertToVector256Int16(Sse2.LoadVector128(blockPtr0 + (kp + 1) * 16));
+                    var v1b = Avx2.ConvertToVector256Int16(Sse2.LoadVector128(blockPtr0 + blockBytes + (kp + 1) * 16));
                     var diff0b = Avx2.Subtract(v0b, qBroadcast[kp + 1]);
                     var diff1b = Avx2.Subtract(v1b, qBroadcast[kp + 1]);
                     acc0b = Avx2.Add(acc0b, Avx2.MultiplyAddAdjacent(diff0b, diff0b));
@@ -660,8 +582,6 @@ public sealed unsafe class IvfDetector : IFraudDetector
                 }
             }
 
-            // Ultra-early exit: if heap is full and all lanes already exceed worst
-            // with only earlyExit1 dim-pairs (~25% of distance), skip both blocks.
             if (heapSize == k)
             {
                 var threshold1 = Vector256.Create(heapDist[0]);
@@ -677,11 +597,10 @@ public sealed unsafe class IvfDetector : IFraudDetector
                     continue;
             }
 
-            // Phase 2: remaining dim-pairs up to earlyExitDimPairs
             for (int kp = earlyExit1; kp < earlyExitDimPairs; kp += 2)
             {
-                var v0 = Avx2.LoadVector256(blockPtr0 + kp * 16).AsInt16();
-                var v1 = Avx2.LoadVector256(blockPtr0 + blockShorts + kp * 16).AsInt16();
+                var v0 = Avx2.ConvertToVector256Int16(Sse2.LoadVector128(blockPtr0 + kp * 16));
+                var v1 = Avx2.ConvertToVector256Int16(Sse2.LoadVector128(blockPtr0 + blockBytes + kp * 16));
                 var diff0 = Avx2.Subtract(v0, qBroadcast[kp]);
                 var diff1 = Avx2.Subtract(v1, qBroadcast[kp]);
                 acc0a = Avx2.Add(acc0a, Avx2.MultiplyAddAdjacent(diff0, diff0));
@@ -689,8 +608,8 @@ public sealed unsafe class IvfDetector : IFraudDetector
 
                 if (kp + 1 < earlyExitDimPairs)
                 {
-                    var v0b = Avx2.LoadVector256(blockPtr0 + (kp + 1) * 16).AsInt16();
-                    var v1b = Avx2.LoadVector256(blockPtr0 + blockShorts + (kp + 1) * 16).AsInt16();
+                    var v0b = Avx2.ConvertToVector256Int16(Sse2.LoadVector128(blockPtr0 + (kp + 1) * 16));
+                    var v1b = Avx2.ConvertToVector256Int16(Sse2.LoadVector128(blockPtr0 + blockBytes + (kp + 1) * 16));
                     var diff0b = Avx2.Subtract(v0b, qBroadcast[kp + 1]);
                     var diff1b = Avx2.Subtract(v1b, qBroadcast[kp + 1]);
                     acc0b = Avx2.Add(acc0b, Avx2.MultiplyAddAdjacent(diff0b, diff0b));
@@ -698,7 +617,6 @@ public sealed unsafe class IvfDetector : IFraudDetector
                 }
             }
 
-            // Merge dual accumulators
             Vector256<int> partial0 = Avx2.Add(acc0a, acc0b);
             Vector256<int> partial1 = Avx2.Add(acc1a, acc1b);
 
@@ -723,12 +641,12 @@ public sealed unsafe class IvfDetector : IFraudDetector
                 Vector256<int> full0 = partial0;
                 for (int kp = earlyExitDimPairs; kp < dimPairs; kp += 2)
                 {
-                    var v0 = Avx2.LoadVector256(blockPtr0 + kp * 16).AsInt16();
+                    var v0 = Avx2.ConvertToVector256Int16(Sse2.LoadVector128(blockPtr0 + kp * 16));
                     var diff0 = Avx2.Subtract(v0, qBroadcast[kp]);
                     full0 = Avx2.Add(full0, Avx2.MultiplyAddAdjacent(diff0, diff0));
                     if (kp + 1 < dimPairs)
                     {
-                        var v0b = Avx2.LoadVector256(blockPtr0 + (kp + 1) * 16).AsInt16();
+                        var v0b = Avx2.ConvertToVector256Int16(Sse2.LoadVector128(blockPtr0 + (kp + 1) * 16));
                         var diff0b = Avx2.Subtract(v0b, qBroadcast[kp + 1]);
                         full0 = Avx2.Add(full0, Avx2.MultiplyAddAdjacent(diff0b, diff0b));
                     }
@@ -754,12 +672,12 @@ public sealed unsafe class IvfDetector : IFraudDetector
                 Vector256<int> full1 = partial1;
                 for (int kp = earlyExitDimPairs; kp < dimPairs; kp += 2)
                 {
-                    var v1 = Avx2.LoadVector256(blockPtr0 + blockShorts + kp * 16).AsInt16();
+                    var v1 = Avx2.ConvertToVector256Int16(Sse2.LoadVector128(blockPtr0 + blockBytes + kp * 16));
                     var diff1 = Avx2.Subtract(v1, qBroadcast[kp]);
                     full1 = Avx2.Add(full1, Avx2.MultiplyAddAdjacent(diff1, diff1));
                     if (kp + 1 < dimPairs)
                     {
-                        var v1b = Avx2.LoadVector256(blockPtr0 + blockShorts + (kp + 1) * 16).AsInt16();
+                        var v1b = Avx2.ConvertToVector256Int16(Sse2.LoadVector128(blockPtr0 + blockBytes + (kp + 1) * 16));
                         var diff1b = Avx2.Subtract(v1b, qBroadcast[kp + 1]);
                         full1 = Avx2.Add(full1, Avx2.MultiplyAddAdjacent(diff1b, diff1b));
                     }
@@ -781,10 +699,9 @@ public sealed unsafe class IvfDetector : IFraudDetector
             }
         }
 
-        // Odd trailing block
         if (b < numBlocks)
         {
-            short* blockPtr = clusterVecBase + b * blockShorts;
+            sbyte* blockPtr = clusterVecBase + b * blockBytes;
             int validLanes = count - b * bv;
             if (validLanes > bv) validLanes = bv;
 
@@ -792,12 +709,12 @@ public sealed unsafe class IvfDetector : IFraudDetector
             Vector256<int> accB = Vector256<int>.Zero;
             for (int kp = 0; kp < earlyExitDimPairs; kp += 2)
             {
-                var v = Avx2.LoadVector256(blockPtr + kp * 16).AsInt16();
+                var v = Avx2.ConvertToVector256Int16(Sse2.LoadVector128(blockPtr + kp * 16));
                 var diff = Avx2.Subtract(v, qBroadcast[kp]);
                 accA = Avx2.Add(accA, Avx2.MultiplyAddAdjacent(diff, diff));
                 if (kp + 1 < earlyExitDimPairs)
                 {
-                    var vb = Avx2.LoadVector256(blockPtr + (kp + 1) * 16).AsInt16();
+                    var vb = Avx2.ConvertToVector256Int16(Sse2.LoadVector128(blockPtr + (kp + 1) * 16));
                     var diffb = Avx2.Subtract(vb, qBroadcast[kp + 1]);
                     accB = Avx2.Add(accB, Avx2.MultiplyAddAdjacent(diffb, diffb));
                 }
@@ -816,12 +733,12 @@ public sealed unsafe class IvfDetector : IFraudDetector
                 Vector256<int> full = partial;
                 for (int kp = earlyExitDimPairs; kp < dimPairs; kp += 2)
                 {
-                    var v = Avx2.LoadVector256(blockPtr + kp * 16).AsInt16();
+                    var v = Avx2.ConvertToVector256Int16(Sse2.LoadVector128(blockPtr + kp * 16));
                     var diff = Avx2.Subtract(v, qBroadcast[kp]);
                     full = Avx2.Add(full, Avx2.MultiplyAddAdjacent(diff, diff));
                     if (kp + 1 < dimPairs)
                     {
-                        var vb = Avx2.LoadVector256(blockPtr + (kp + 1) * 16).AsInt16();
+                        var vb = Avx2.ConvertToVector256Int16(Sse2.LoadVector128(blockPtr + (kp + 1) * 16));
                         var diffb = Avx2.Subtract(vb, qBroadcast[kp + 1]);
                         full = Avx2.Add(full, Avx2.MultiplyAddAdjacent(diffb, diffb));
                     }
@@ -845,17 +762,17 @@ public sealed unsafe class IvfDetector : IFraudDetector
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void ScanClusterScalar(short* qInt, short* clusterVecBase, int offset, int count, int numBlocks,
+    private static void ScanClusterScalar(short* qInt8, sbyte* clusterVecBase, int offset, int count, int numBlocks,
         int* heapIdx, int* heapDist, ref int heapSize, int k)
     {
         const int pd = IvfBinaryFormat.PaddedDims;
         const int bv = IvfBinaryFormat.BlockVectors;
-        const int blockShorts = pd * bv;
+        const int blockBytes = pd * bv;
         const int dimPairs = pd / 2;
 
         for (int b = 0; b < numBlocks; b++)
         {
-            short* blockPtr = clusterVecBase + b * blockShorts;
+            sbyte* blockPtr = clusterVecBase + b * blockBytes;
             int validLanes = Math.Min(bv, count - b * bv);
 
             for (int v = 0; v < validLanes; v++)
@@ -863,8 +780,8 @@ public sealed unsafe class IvfDetector : IFraudDetector
                 int dist = 0;
                 for (int kp = 0; kp < dimPairs; kp++)
                 {
-                    int diff0 = qInt[2 * kp]     - blockPtr[kp * 16 + v * 2];
-                    int diff1 = qInt[2 * kp + 1] - blockPtr[kp * 16 + v * 2 + 1];
+                    int diff0 = qInt8[2 * kp]     - blockPtr[kp * 16 + v * 2];
+                    int diff1 = qInt8[2 * kp + 1] - blockPtr[kp * 16 + v * 2 + 1];
                     dist += diff0 * diff0 + diff1 * diff1;
                 }
 
@@ -948,8 +865,14 @@ public sealed unsafe class IvfDetector : IFraudDetector
 
     public void Dispose()
     {
-        if (_centroidsT != null)
-            System.Runtime.InteropServices.NativeMemory.AlignedFree(_centroidsT);
+        if (_centroidsT8 != null)
+            System.Runtime.InteropServices.NativeMemory.AlignedFree(_centroidsT8);
+        if (_bboxMin8 != null)
+            System.Runtime.InteropServices.NativeMemory.AlignedFree(_bboxMin8);
+        if (_bboxMax8 != null)
+            System.Runtime.InteropServices.NativeMemory.AlignedFree(_bboxMax8);
+        if (_clusterRadius8 != null)
+            System.Runtime.InteropServices.NativeMemory.AlignedFree(_clusterRadius8);
         _exactAccessor?.SafeMemoryMappedViewHandle.ReleasePointer();
         _exactAccessor?.Dispose();
         _exactMmf?.Dispose();
@@ -958,21 +881,38 @@ public sealed unsafe class IvfDetector : IFraudDetector
         _mmf.Dispose();
     }
 
-    private static short* AllocAndTransposeCentroids(short* centroids, int K, int pd)
+    private static sbyte* AllocAndTransposeCentroidsInt8(short* centroids, int K, int pd)
     {
-        // Dim-pair interleaved layout for vpmaddwd:
-        // buf[dp * K * 2 + c * 2 + sub_d] where dp = dim/2, sub_d = dim%2
-        // Loading 16 consecutive shorts gives 8 clusters × 2 dims, perfect
-        // for MultiplyAddAdjacent which produces 8 int32 partial sums.
-        nuint bytes = (nuint)((long)K * pd * sizeof(short));
-        short* buf = (short*)System.Runtime.InteropServices.NativeMemory.AlignedAlloc(bytes, 64);
+        const int shift = IvfBinaryFormat.Int16ToInt8Shift;
+        nuint bytes = (nuint)((long)K * pd);
+        sbyte* buf = (sbyte*)System.Runtime.InteropServices.NativeMemory.AlignedAlloc(bytes, 64);
         int dimPairs = pd / 2;
         for (int c = 0; c < K; c++)
             for (int dp = 0; dp < dimPairs; dp++)
             {
-                buf[(long)dp * K * 2 + c * 2]     = centroids[(long)c * pd + dp * 2];
-                buf[(long)dp * K * 2 + c * 2 + 1] = centroids[(long)c * pd + dp * 2 + 1];
+                buf[(long)dp * K * 2 + c * 2]     = (sbyte)Math.Clamp(centroids[(long)c * pd + dp * 2] >> shift, -128, 127);
+                buf[(long)dp * K * 2 + c * 2 + 1] = (sbyte)Math.Clamp(centroids[(long)c * pd + dp * 2 + 1] >> shift, -128, 127);
             }
+        return buf;
+    }
+
+    private static sbyte* AllocConvertInt16ToInt8(short* src, int count)
+    {
+        const int shift = IvfBinaryFormat.Int16ToInt8Shift;
+        nuint bytes = (nuint)count;
+        sbyte* buf = (sbyte*)System.Runtime.InteropServices.NativeMemory.AlignedAlloc(bytes, 64);
+        for (int i = 0; i < count; i++)
+            buf[i] = (sbyte)Math.Clamp(src[i] >> shift, -128, 127);
+        return buf;
+    }
+
+    private static uint* AllocScaleRadius(uint* src, int count)
+    {
+        const int shift = IvfBinaryFormat.Int16ToInt8Shift;
+        nuint bytes = (nuint)(count * sizeof(uint));
+        uint* buf = (uint*)System.Runtime.InteropServices.NativeMemory.AlignedAlloc(bytes, 64);
+        for (int i = 0; i < count; i++)
+            buf[i] = (src[i] + (1u << shift) - 1) >> shift;
         return buf;
     }
 }

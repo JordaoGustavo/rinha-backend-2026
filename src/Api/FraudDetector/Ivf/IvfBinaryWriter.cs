@@ -9,6 +9,7 @@ public static class IvfBinaryWriter
         const int pd = IvfBinaryFormat.PaddedDims;
         const int bv = IvfBinaryFormat.BlockVectors;
         const int scale = IvfBinaryFormat.Scale;
+        const int int8Scale = IvfBinaryFormat.Int8Scale;
 
         var paddedOffsets = new int[k];
         var counts = new int[k];
@@ -21,9 +22,12 @@ public static class IvfBinaryWriter
             totalSlots += blocks * bv;
         }
 
+        // int16 vectors are needed for profile fast path building (uses scale=4096 thresholds).
         var int16Vectors = new short[(long)totalSlots * pd];
+        // int8 vectors for the binary storage (halves mmap size).
+        var int8Vectors = new sbyte[(long)totalSlots * pd];
         var paddedLabels = new byte[totalSlots];
-        var paddedOriginalIndices = new int[totalSlots]; // -1 for padding slots
+        var paddedOriginalIndices = new int[totalSlots];
         Array.Fill(paddedOriginalIndices, -1);
         for (int c = 0; c < k; c++)
         {
@@ -35,7 +39,10 @@ public static class IvfBinaryWriter
                 int sBase = (srcOff + i) * pd;
                 int dBase = (dstOff + i) * pd;
                 for (int d = 0; d < pd; d++)
+                {
                     int16Vectors[dBase + d] = ClampToShort(ivf.Vectors[sBase + d] * scale);
+                    int8Vectors[dBase + d] = ClampToSByte(ivf.Vectors[sBase + d] * int8Scale);
+                }
                 paddedLabels[dstOff + i] = ivf.Labels[srcOff + i];
                 paddedOriginalIndices[dstOff + i] = ivf.OriginalIndices[srcOff + i];
             }
@@ -94,7 +101,7 @@ public static class IvfBinaryWriter
         }
 
         int totalBlocks = totalSlots / bv;
-        var blockedVectors = new short[(long)totalSlots * pd];
+        var blockedVectors = new sbyte[(long)totalSlots * pd];
         for (int b = 0; b < totalBlocks; b++)
         {
             int blockStart = b * bv;
@@ -104,8 +111,8 @@ public static class IvfBinaryWriter
                 {
                     int srcBase = (blockStart + v) * pd + 2 * kp;
                     int dstBase = b * pd * bv + kp * 2 * bv + v * 2;
-                    blockedVectors[dstBase + 0] = int16Vectors[srcBase + 0];
-                    blockedVectors[dstBase + 1] = int16Vectors[srcBase + 1];
+                    blockedVectors[dstBase + 0] = int8Vectors[srcBase + 0];
+                    blockedVectors[dstBase + 1] = int8Vectors[srcBase + 1];
                 }
             }
         }
@@ -141,7 +148,7 @@ public static class IvfBinaryWriter
             bw.Write((uint)counts[c]);
         }
 
-        WriteShortArray(bw, blockedVectors, totalSlots * pd);
+        WriteSByteArray(bw, blockedVectors, totalSlots * pd);
         bw.Write(paddedLabels, 0, totalSlots);
         WriteInt32Array(bw, paddedOriginalIndices, totalSlots);
 
@@ -198,6 +205,21 @@ public static class IvfBinaryWriter
         if (v > short.MaxValue) return short.MaxValue;
         if (v < short.MinValue) return short.MinValue;
         return (short)v;
+    }
+
+    private static sbyte ClampToSByte(float v)
+    {
+        v = MathF.Round(v);
+        if (v > sbyte.MaxValue) return sbyte.MaxValue;
+        if (v < sbyte.MinValue) return sbyte.MinValue;
+        return (sbyte)v;
+    }
+
+    private static void WriteSByteArray(BinaryWriter bw, sbyte[] data, int count)
+    {
+        var bytes = new byte[count];
+        Buffer.BlockCopy(data, 0, bytes, 0, bytes.Length);
+        bw.Write(bytes);
     }
 
     private static void WriteFloatArray(BinaryWriter bw, float[] data, int count)
