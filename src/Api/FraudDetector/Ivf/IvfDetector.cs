@@ -186,17 +186,10 @@ public sealed unsafe class IvfDetector : IFraudDetector
 
         if (_exactVectors != null)
         {
-            // Walk the float32 reference data so the first real query doesn't
-            // pay random page-fault cost during the rerank stage.
             const int pd = IvfBinaryFormat.PaddedDims;
             long exactBytes = (long)NumVectors * pd * sizeof(float);
             byte* exactBase = (byte*)_exactVectors;
-            // Random access (rerank touches ~6 vectors anywhere in the file
-            // per query). Disable readahead, request hugepages.
             MmapHints.HintRandom(exactBase, exactBytes);
-            MmapHints.HintHugePages(exactBase, exactBytes);
-            for (long i = 0; i < exactBytes; i += 4096)
-                _ = exactBase[i];
         }
     }
 
