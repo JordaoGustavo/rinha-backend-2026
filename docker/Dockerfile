@@ -39,6 +39,11 @@ RUN mkdir -p /data \
 RUN dotnet run --project src/Api/Api.csproj -c Release -- \
         gen-warmup /resources/warmup-payloads.ndjson 200
 
+# Accuracy gate: int8 IVF vs exact oracle. Exits non-zero if any
+# approved/denied decision disagrees, failing the Docker build.
+RUN dotnet run --project src/Api/Api.csproj -c Release -- \
+        accuracy /data/ivf.bin /data/exact.bin 10000
+
 # AOT publish for the target runtime.
 RUN dotnet publish src/Api/Api.csproj -c Release -r ${RUNTIME_ID} -o /app
 
