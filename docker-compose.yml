@@ -46,7 +46,6 @@ services:
       - CUSTOM_HTTP=1
       - NPROBE_FULL=5
       - UNANIMITY_SKIP=1
-      - PROFILE_MIN_COUNT=15
     volumes:
       - sock:/run/sock
     cpuset: "1,2"
@@ -68,7 +67,6 @@ services:
       - CUSTOM_HTTP=1
       - NPROBE_FULL=5
       - UNANIMITY_SKIP=1
-      - PROFILE_MIN_COUNT=15
     volumes:
       - sock:/run/sock
     cpuset: "2,3"
