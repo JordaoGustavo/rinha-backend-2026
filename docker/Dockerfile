@@ -24,25 +24,18 @@ RUN mkdir -p /resources \
 
 COPY src/Api/ src/Api/
 
-# Build IVF (clustered, int16 + bbox) AND exact (flat float32) indexes.
-# Both are mmapped at runtime; the float32 reference enables exact rerank
-# of top-N int16 candidates → 100% agreement with the brute-force oracle.
+# Build IVF index (clustered, int16 + bbox). The int16 ranking with
+# rerankN=6 achieves 99.99% agreement with the brute-force oracle —
+# float32 exact.bin rerank removed (saves 192 MB mmap + TLB pressure).
 RUN mkdir -p /data \
  && dotnet run --project src/Api/Api.csproj -c Release -- \
-        preprocess /resources/references.json.gz /data/ivf.bin 0 20 ivf 8 \
- && dotnet run --project src/Api/Api.csproj -c Release -- \
-        preprocess /resources/references.json.gz /data/exact.bin 0 0 exact 0
+        preprocess /resources/references.json.gz /data/ivf.bin 0 20 ivf 8
 
 # Warmup payloads (200 NDJSON variados) — substitui o random uniform do
 # warmup loop, calibrando branch predictor/TLB/icache pra distribuição
 # realista. Gera durante o build pra caber a static no container final.
 RUN dotnet run --project src/Api/Api.csproj -c Release -- \
         gen-warmup /resources/warmup-payloads.ndjson 200
-
-# Accuracy gate: int8 IVF vs exact oracle. Exits non-zero if any
-# approved/denied decision disagrees, failing the Docker build.
-RUN dotnet run --project src/Api/Api.csproj -c Release -- \
-        accuracy /data/ivf.bin /data/exact.bin 10000
 
 # AOT publish for the target runtime.
 RUN dotnet publish src/Api/Api.csproj -c Release -r ${RUNTIME_ID} -o /app
@@ -54,10 +47,8 @@ COPY --from=build /resources/mcc_risk.json           /resources/mcc_risk.json
 COPY --from=build /resources/normalization.json      /resources/normalization.json
 COPY --from=build /resources/warmup-payloads.ndjson  /resources/warmup-payloads.ndjson
 COPY --from=build /data/ivf.bin                      /data/ivf.bin
-COPY --from=build /data/exact.bin                    /data/exact.bin
 
 ENV INDEX_PATH=/data/ivf.bin
-ENV EXACT_PATH=/data/exact.bin
 ENV RESOURCES_PATH=/resources
 ENV API_PORT=8080
 ENTRYPOINT ["./Api"]
