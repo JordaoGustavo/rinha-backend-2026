@@ -17,8 +17,8 @@ public static class AccuracyCommand
         int count        = args.Length > 2 ? int.Parse(args[2]) : 10_000;
         int seed         = args.Length > 3 ? int.Parse(args[3]) : 0xBADBEEF;
 
-        Console.WriteLine($"Opening IVF index from {ivfPath} (with exact float32 rerank from {exactPath})...");
-        using var ivf = IvfDetector.OpenWithExactRerank(ivfPath, exactPath);
+        Console.WriteLine($"Opening IVF index from {ivfPath} (with deq rerank)...");
+        using var ivf = IvfDetector.Open(ivfPath);
         ivf.Prefault();
 
         Console.WriteLine($"Opening EXACT oracle from {exactPath}...");
