@@ -2,16 +2,11 @@
 # Resources match the rinha rules: 1 CPU and 350 MB total; 1 LB + 2 API
 # replicas; bridge network; port 9999; no business logic on the LB.
 #
-# CPU limit declared via deploy.resources.limits.cpus (rinha 2026 standard
-# template). Default cpu_period (100ms) means worst-case CFS throttle wait
-# can reach ~90ms — visible in the p99 tail. The detector keeps server work
-# under ~250µs, so 99% of requests stay off the throttle path entirely.
+# CPU split: LB 0.15 + API 0.425 × 2 = 1.00. so-no-forevis at TCP splice
+# uses ~30µs/req — 0.15 CPU is plenty at 900 req/s peak. Extra 0.025/API
+# reduces CFS throttle probability on IVF queries.
 
 services:
-  # A/B: trocar haproxy:3.1 → jrblatt/so-no-forevis:v0.0.2 (proxy UDS
-  # minimalista). Mantém LB em 0.20 CPU (split rinha 2026 padrão).
-  # Memória bump 16 → 40 MB para folga sob bursts; budget compensado
-  # cortando 162 → 155 MB por API (40 + 155 + 155 = 350 MB total).
   lb:
     image: jrblatt/so-no-forevis:v0.0.2
     restart: always
@@ -31,7 +26,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.20"
+          cpus: "0.15"
           memory: "40MB"
     ulimits:
       nofile:
@@ -46,25 +41,17 @@ services:
     image: ghcr.io/jordaogustavo/rinha-api:latest
     environment:
       - SOCKET_PATH=/run/sock/api1.sock
-      # nprobe sweep (10 k synthetic queries, NPROBE_FULL=5):
-      # 100% accuracy at nprobe ∈ [3, 8]; 5 is the latency floor (0.138 ms
-      # vs 0.193 at the binary default 35). Stage-1 cluster scan does
-      # ~5 × ~750 vec; bbox-repair sweeps the rest with lb-skip.
       - NPROBE_FULL=5
-      # Kestrel bypass: SocketHttpServer raw HTTP/1.1 sobre UDS.
       - CUSTOM_HTTP=1
-      # A/B test: ScanClusterAvx2 early-exit em 3 dim-pairs (mais agressivo
-      # que default 4). Pode ganhar µs por cluster scaneado mas com
-      # threshold mais frouxo passa mais falsos positivos pro full scan.
-      # Acurácia validada local: 100% em 10k queries.
       - EARLY_EXIT_DIMS=3
+      - PROFILE_MIN_COUNT=15
     volumes:
       - sock:/run/sock
     cpuset: "1,2"
     deploy:
       resources:
         limits:
-          cpus: "0.40"
+          cpus: "0.425"
           memory: "155MB"
     networks:
       - rinha
@@ -74,20 +61,16 @@ services:
     environment:
       - SOCKET_PATH=/run/sock/api2.sock
       - NPROBE_FULL=5
-      # Kestrel bypass: SocketHttpServer raw HTTP/1.1 sobre UDS.
       - CUSTOM_HTTP=1
-      # A/B test: ScanClusterAvx2 early-exit em 3 dim-pairs (mais agressivo
-      # que default 4). Pode ganhar µs por cluster scaneado mas com
-      # threshold mais frouxo passa mais falsos positivos pro full scan.
-      # Acurácia validada local: 100% em 10k queries.
       - EARLY_EXIT_DIMS=3
+      - PROFILE_MIN_COUNT=15
     volumes:
       - sock:/run/sock
     cpuset: "2,3"
     deploy:
       resources:
         limits:
-          cpus: "0.40"
+          cpus: "0.425"
           memory: "155MB"
     networks:
       - rinha
