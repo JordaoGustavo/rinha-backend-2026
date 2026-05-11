@@ -10,11 +10,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.20"
-          # Bumped 8 MB → 16 MB after the submission run hit 5 http_errors
-          # (~0.01 % failure, –180 detection pts). Hypothesis: 8 MB is tight
-          # under burst with maxconn 20 000. Fits in 350 MB total budget by
-          # trimming each API 165 → 162 MB (16 + 162 + 162 = 340 MB).
+          cpus: "0.15"
           memory: "16MB"
     depends_on:
       - api1
@@ -38,6 +34,7 @@ services:
       - NPROBE_FULL=5
       # Kestrel bypass: SocketHttpServer raw HTTP/1.1 sobre UDS.
       - CUSTOM_HTTP=1
+      - PROFILE_MIN_COUNT=15
     volumes:
       - sock:/run/sock
       - ../data:/data:ro
@@ -45,7 +42,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.40"
+          cpus: "0.425"
           memory: "162MB"
     networks:
       - rinha
@@ -62,6 +59,7 @@ services:
       - NPROBE_FULL=5
       # Kestrel bypass: SocketHttpServer raw HTTP/1.1 sobre UDS.
       - CUSTOM_HTTP=1
+      - PROFILE_MIN_COUNT=15
     volumes:
       - sock:/run/sock
       - ../data:/data:ro
@@ -69,7 +67,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.40"
+          cpus: "0.425"
           memory: "162MB"
     networks:
       - rinha

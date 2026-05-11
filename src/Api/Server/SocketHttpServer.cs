@@ -64,7 +64,7 @@ public sealed class SocketHttpServer : IDisposable
 
     private async Task HandleConnectionAsync(Socket client)
     {
-        byte[] buffer = ArrayPool<byte>.Shared.Rent(8192);
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(4096);
         int filled = 0;
         try
         {
