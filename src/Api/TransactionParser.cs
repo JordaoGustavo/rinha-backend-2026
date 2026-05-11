@@ -273,13 +273,13 @@ public static class TransactionParser
         // zH: 0=Sat, 1=Sun, 2=Mon, ..., 6=Fri. Mon-based 0..6 = (zH+5) % 7.
         int monBased = (zH + 5) % 7;
 
-        vector[0] = (float)Math.Round(ClampD(txAmount / _maxAmount), 4);
-        vector[1] = (float)Math.Round(ClampD(txInstallments / _maxInstallments), 4);
+        vector[0] = (float)ClampD(txAmount / _maxAmount);
+        vector[1] = (float)ClampD(txInstallments / _maxInstallments);
         vector[2] = custAvgAmount == 0.0
             ? 1.0f
-            : (float)Math.Round(ClampD((txAmount / custAvgAmount) / _amountVsAvgRatio), 4);
-        vector[3] = (float)Math.Round(txHour / 23.0, 4);
-        vector[4] = (float)Math.Round(monBased / 6.0, 4);
+            : (float)ClampD((txAmount / custAvgAmount) / _amountVsAvgRatio);
+        vector[3] = (float)(txHour / 23.0);
+        vector[4] = (float)(monBased / 6.0);
 
         if (hasLastTx)
         {
@@ -301,8 +301,8 @@ public static class TransactionParser
                 var b = new DateTime(lastYear, lastMonth, lastDay, lastHour, lastMinute, lastSecond, DateTimeKind.Utc);
                 minutes = (a - b).TotalMinutes;
             }
-            vector[5] = (float)Math.Round(ClampD(minutes / _maxMinutes), 4);
-            vector[6] = (float)Math.Round(ClampD(lastTxKmFromCurrent / _maxKm), 4);
+            vector[5] = (float)ClampD(minutes / _maxMinutes);
+            vector[6] = (float)ClampD(lastTxKmFromCurrent / _maxKm);
         }
         else
         {
@@ -310,8 +310,8 @@ public static class TransactionParser
             vector[6] = -1f;
         }
 
-        vector[7] = (float)Math.Round(ClampD(terminalKmFromHome / _maxKm), 4);
-        vector[8] = (float)Math.Round(ClampD(custTxCount24h / _maxTxCount24h), 4);
+        vector[7] = (float)ClampD(terminalKmFromHome / _maxKm);
+        vector[8] = (float)ClampD(custTxCount24h / _maxTxCount24h);
         vector[9] = terminalIsOnline ? 1f : 0f;
         vector[10] = terminalCardPresent ? 1f : 0f;
 
@@ -326,6 +326,6 @@ public static class TransactionParser
         vector[11] = isUnknown ? 1f : 0f;
 
         vector[12] = GetMccRisk(merchantMcc);
-        vector[13] = (float)Math.Round(ClampD(merchantAvgAmount / _maxMerchantAvgAmount), 4);
+        vector[13] = (float)ClampD(merchantAvgAmount / _maxMerchantAvgAmount);
     }
 }
