@@ -9,6 +9,7 @@
 services:
   lb:
     image: jrblatt/so-no-forevis:v0.0.2
+    pull_policy: always
     restart: always
     depends_on:
       - api1
@@ -39,6 +40,7 @@ services:
 
   api1:
     image: ghcr.io/jordaogustavo/rinha-api:latest
+    pull_policy: always
     environment:
       - SOCKET_PATH=/run/sock/api1.sock
       - NPROBE_FULL=5
@@ -61,6 +63,7 @@ services:
 
   api2:
     image: ghcr.io/jordaogustavo/rinha-api:latest
+    pull_policy: always
     environment:
       - SOCKET_PATH=/run/sock/api2.sock
       - NPROBE_FULL=5
