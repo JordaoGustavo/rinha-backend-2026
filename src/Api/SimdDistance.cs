@@ -279,46 +279,44 @@ public static class SimdDistance
     {
         if (Avx2.IsSupported)
         {
-            // Inicializa acumuladores em zero
             var zero = Vector256<int>.Zero;
             for (int c = 0; c < K; c += 8)
                 Avx.Store(outDists + c, zero);
 
-            for (int d = 0; d < pd; d++)
+            // Dim-pair interleaved layout: centroidsT[dp * K * 2 + c * 2 + sub_d].
+            // vpmaddwd (1-cycle throughput Haswell) replaces vpmovsxwd + vpmulld
+            // (2-cycle throughput). Each iter loads 8 clusters × 2 dims and
+            // produces 8 int32 partial L2² sums in one MADD instruction.
+            int dimPairs = pd / 2;
+            for (int dp = 0; dp < dimPairs; dp++)
             {
-                var qd = Vector256.Create(qInt[d]);
-                short* dimBase = centroidsT + (long)d * K;
+                int qPairVal = ((ushort)qInt[dp * 2]) | ((ushort)qInt[dp * 2 + 1] << 16);
+                var qPair = Vector256.Create(qPairVal).AsInt16();
+                short* pairBase = centroidsT + (long)dp * K * 2;
 
-                for (int c = 0; c < K; c += 16)
+                for (int c = 0; c < K; c += 8)
                 {
-                    var cents = Avx.LoadVector256(dimBase + c);
-                    var diff = Avx2.Subtract(cents, qd);
-
-                    // 16 shorts → 2× 8 int32 → square → add to accumulator
-                    var diffLo = diff.GetLower();
-                    var diffLo32 = Avx2.ConvertToVector256Int32(diffLo);
-                    var sqLo = Avx2.MultiplyLow(diffLo32, diffLo32);
-                    var accLo = Avx.LoadVector256(outDists + c);
-                    Avx.Store(outDists + c, Avx2.Add(accLo, sqLo));
-
-                    var diffHi = Avx2.ExtractVector128(diff, 1);
-                    var diffHi32 = Avx2.ConvertToVector256Int32(diffHi);
-                    var sqHi = Avx2.MultiplyLow(diffHi32, diffHi32);
-                    var accHi = Avx.LoadVector256(outDists + c + 8);
-                    Avx.Store(outDists + c + 8, Avx2.Add(accHi, sqHi));
+                    var cents = Avx2.LoadVector256(pairBase + c * 2);
+                    var diff = Avx2.Subtract(cents, qPair);
+                    var madd = Avx2.MultiplyAddAdjacent(diff, diff);
+                    var acc = Avx.LoadVector256(outDists + c);
+                    Avx.Store(outDists + c, Avx2.Add(acc, madd));
                 }
             }
             return;
         }
 
-        // Scalar fallback (test/non-AVX2 platforms)
+        // Scalar fallback — dim-pair interleaved layout
+        int scalarDimPairs = pd / 2;
         for (int c = 0; c < K; c++)
         {
             int sum = 0;
-            for (int d = 0; d < pd; d++)
+            for (int dp = 0; dp < scalarDimPairs; dp++)
             {
-                int diff = centroidsT[d * K + c] - qInt[d];
-                sum += diff * diff;
+                long pairOff = (long)dp * K * 2 + c * 2;
+                int d0 = centroidsT[pairOff]     - qInt[dp * 2];
+                int d1 = centroidsT[pairOff + 1] - qInt[dp * 2 + 1];
+                sum += d0 * d0 + d1 * d1;
             }
             outDists[c] = sum;
         }

@@ -941,11 +941,19 @@ public sealed unsafe class IvfDetector : IFraudDetector
 
     private static short* AllocAndTransposeCentroids(short* centroids, int K, int pd)
     {
+        // Dim-pair interleaved layout for vpmaddwd:
+        // buf[dp * K * 2 + c * 2 + sub_d] where dp = dim/2, sub_d = dim%2
+        // Loading 16 consecutive shorts gives 8 clusters × 2 dims, perfect
+        // for MultiplyAddAdjacent which produces 8 int32 partial sums.
         nuint bytes = (nuint)((long)K * pd * sizeof(short));
         short* buf = (short*)System.Runtime.InteropServices.NativeMemory.AlignedAlloc(bytes, 64);
+        int dimPairs = pd / 2;
         for (int c = 0; c < K; c++)
-            for (int d = 0; d < pd; d++)
-                buf[(long)d * K + c] = centroids[(long)c * pd + d];
+            for (int dp = 0; dp < dimPairs; dp++)
+            {
+                buf[(long)dp * K * 2 + c * 2]     = centroids[(long)c * pd + dp * 2];
+                buf[(long)dp * K * 2 + c * 2 + 1] = centroids[(long)c * pd + dp * 2 + 1];
+            }
         return buf;
     }
 }

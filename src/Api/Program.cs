@@ -1,12 +1,19 @@
 using System.Diagnostics;
 using System.IO.Pipelines;
+using System.Runtime;
 using System.Text;
 using Rinha.Api;
 
-// SetMinThreads(8, 8) was tested and removed: at the API's 0.4 effective
-// CPU under CFS quota, 8 ready workers serialize behind a single timeslice.
-// CFS arbitrarily picks one — often not the one that received the wakeup
-// byte — and the cross-worker handoff drops into p99 as 1–3 ms tail.
+// Suppress Gen2 collections during request handling. With zero-alloc hot path
+// (stackalloc vectors, pre-baked responses, Utf8JsonReader), Gen2 heap grows
+// very slowly — SustainedLowLatency prevents 1–5 ms GC pauses in p99 tail.
+GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency;
+
+// Under CFS quota (0.4 CPU), extra threadpool workers compete for the same
+// timeslice causing cross-worker handoff that shows up as 1–3 ms tail.
+// pedrosakuma/rinha-2026 uses 1+1; cap at 2+2 for safety margin.
+ThreadPool.SetMinThreads(1, 1);
+ThreadPool.SetMaxThreads(2, 2);
 
 bool serverTimingEnabled = Environment.GetEnvironmentVariable("SERVER_TIMING") == "1";
 
