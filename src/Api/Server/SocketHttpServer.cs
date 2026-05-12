@@ -2,21 +2,12 @@ using System.Buffers;
 using System.Diagnostics;
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 
 namespace Rinha.Api;
 
-/// <summary>
-/// Minimal HTTP/1.1 server bypassing Kestrel: accepts on a Unix socket, parses
-/// just enough of each request to dispatch (Method + Path + Content-Length),
-/// and writes a pre-built complete-response buffer in a single Send.
-///
-/// Why bypass Kestrel: at 1 CPU + 350 MB the API's bottleneck is CFS quota,
-/// and the doc-measured baseline shows ~7 ms of HTTP overhead per request
-/// vs ~1 ms of actual IVF work. Kestrel's middleware pipeline, HttpContext
-/// allocations, and header dictionaries dominate that overhead.
-/// </summary>
 public sealed class SocketHttpServer : IDisposable
 {
     private readonly Socket _listener;
@@ -24,18 +15,37 @@ public sealed class SocketHttpServer : IDisposable
     private readonly HttpResponseTable _responses;
     private readonly CancellationTokenSource _cts = new();
     private readonly bool _serverTimingEnabled;
+    private readonly bool _fdPassing;
     private static readonly double TickToUs = 1_000_000.0 / Stopwatch.Frequency;
+
+    private readonly Socket? _ctrlListener;
 
     public SocketHttpServer(string socketPath, IFraudDetector detector, HttpResponseTable responses, int backlog = 2048)
     {
         _detector = detector;
         _responses = responses;
         _serverTimingEnabled = Environment.GetEnvironmentVariable("SERVER_TIMING") == "1";
+        _fdPassing = Environment.GetEnvironmentVariable("FD_PASSING") == "1";
         if (File.Exists(socketPath)) File.Delete(socketPath);
         _listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
         _listener.Bind(new UnixDomainSocketEndPoint(socketPath));
         _listener.Listen(backlog);
-        File.SetUnixFileMode(socketPath,
+        SetSocketPerms(socketPath);
+
+        if (_fdPassing)
+        {
+            string ctrlPath = socketPath + ".ctrl";
+            if (File.Exists(ctrlPath)) File.Delete(ctrlPath);
+            _ctrlListener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+            _ctrlListener.Bind(new UnixDomainSocketEndPoint(ctrlPath));
+            _ctrlListener.Listen(16);
+            SetSocketPerms(ctrlPath);
+        }
+    }
+
+    private static void SetSocketPerms(string path)
+    {
+        File.SetUnixFileMode(path,
             UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
             UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute |
             UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute);
@@ -59,10 +69,16 @@ public sealed class SocketHttpServer : IDisposable
 
     private void AcceptLoop()
     {
+        if (_fdPassing)
+        {
+            AcceptCtrlLoop();
+            return;
+        }
+
         while (!_cts.IsCancellationRequested)
         {
-            Socket client;
-            try { client = _listener.Accept(); }
+            Socket conn;
+            try { conn = _listener.Accept(); }
             catch { break; }
 
             var thread = new Thread(HandleConnectionSync)
@@ -70,7 +86,54 @@ public sealed class SocketHttpServer : IDisposable
                 IsBackground = true,
                 Name = "conn-handler"
             };
-            thread.Start(client);
+            thread.Start(conn);
+        }
+    }
+
+    private void AcceptCtrlLoop()
+    {
+        while (!_cts.IsCancellationRequested)
+        {
+            Socket ctrlConn;
+            try { ctrlConn = _ctrlListener!.Accept(); }
+            catch { break; }
+
+            var thread = new Thread(() => FdReceiveLoop(ctrlConn))
+            {
+                IsBackground = true,
+                Name = "fd-receiver"
+            };
+            thread.Start();
+        }
+    }
+
+    private void FdReceiveLoop(Socket lbConn)
+    {
+        int lbFd = (int)lbConn.Handle;
+        try
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                int clientFd = FdPassingInterop.ReceiveFd(lbFd);
+                if (clientFd < 0) break;
+
+                var handle = new SafeSocketHandle(new IntPtr(clientFd), ownsHandle: true);
+                var clientSocket = new Socket(handle);
+                clientSocket.NoDelay = true;
+
+                var thread = new Thread(HandleConnectionSync)
+                {
+                    IsBackground = true,
+                    Name = "conn-handler"
+                };
+                thread.Start(clientSocket);
+            }
+        }
+        catch { }
+        finally
+        {
+            try { lbConn.Shutdown(SocketShutdown.Both); } catch { }
+            lbConn.Dispose();
         }
     }
 
@@ -169,18 +232,11 @@ public sealed class SocketHttpServer : IDisposable
         }
         catch
         {
-            // FN (weight 3) cheaper than 5xx (weight 5). Always 200.
             SendAll(client, _responses.Get(true, 0));
         }
         return bodyStart + cl;
     }
 
-    /// <summary>
-    /// Path opt-in (SERVER_TIMING=1) que emite header `Server-Timing` com
-    /// quebra por estágio (parse, s1-cent, s1-scan, s1-bbox, s2-rerank,
-    /// total). Construído dinamicamente — não usa o LUT pré-pronto.
-    /// `scripts/k6/bench-varied.js` extrai esses valores em métricas k6.
-    /// </summary>
     private unsafe void ProcessWithTiming(Socket client, IvfDetector ivf, ReadOnlySpan<byte> body)
     {
         Span<float> vec = stackalloc float[16];
@@ -196,12 +252,7 @@ public sealed class SocketHttpServer : IDisposable
         var (approved, fraudCount) = ivf.ScoreWithTimings(vec, ticks, counts);
         long tTotal = Stopwatch.GetTimestamp() - tStart;
 
-        // Body é o mesmo do LUT pré-pronto — só prepende um framing custom
-        // com Server-Timing header.
         byte[] preBuilt = _responses.Get(approved, fraudCount);
-        // O preBuilt começa com "HTTP/1.1 200 OK\r\nContent-Length: ...\r\n
-        // Content-Type: application/json\r\n\r\n<body>". Pegamos o body
-        // (após \r\n\r\n) e remontamos com o header extra.
         int sep = preBuilt.AsSpan().IndexOf("\r\n\r\n"u8);
         ReadOnlySpan<byte> jsonBody = preBuilt.AsSpan(sep + 4);
 
@@ -216,10 +267,6 @@ public sealed class SocketHttpServer : IDisposable
         sb.Append(", s1-bbox;dur=").Append((ticks[2] * TickToUs).ToString("F2"));
         sb.Append(", s2-rerank;dur=").Append((ticks[3] * TickToUs).ToString("F2"));
         sb.Append(", total;dur=").Append((tTotal * TickToUs).ToString("F2"));
-        // Pass-2 cascade counts piggy-backed as "dur" entries (a hack — the
-        // unit is clusters, not µs, but our analysis parser reads any numeric
-        // value). c-tri = pruned by triangle, c-bbox = pruned by bbox-LB,
-        // c-scan = ScanCluster invoked. Sum = (numClusters - probeCount).
         sb.Append(", c-tri;dur=").Append(counts[0]);
         sb.Append(", c-bbox;dur=").Append(counts[1]);
         sb.Append(", c-scan;dur=").Append(counts[2]);
@@ -264,6 +311,7 @@ public sealed class SocketHttpServer : IDisposable
     {
         _cts.Cancel();
         try { _listener.Close(); } catch { }
+        try { _ctrlListener?.Close(); } catch { }
         _cts.Dispose();
     }
 }

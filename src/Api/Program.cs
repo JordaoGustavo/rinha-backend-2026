@@ -108,7 +108,8 @@ Console.WriteLine("Ready.");
 bool customHttp = Environment.GetEnvironmentVariable("CUSTOM_HTTP") == "1";
 if (customHttp && !string.IsNullOrEmpty(socketPath))
 {
-    Console.WriteLine($"Custom HTTP server (Kestrel bypass) on {socketPath}");
+    bool fdPassing = Environment.GetEnvironmentVariable("FD_PASSING") == "1";
+    Console.WriteLine($"Custom HTTP server (Kestrel bypass) on {socketPath}" + (fdPassing ? " + .ctrl (FD passing)" : ""));
     var customResponses = HttpResponseTable.Build();
     using var server = new SocketHttpServer(socketPath, detector, customResponses);
     await server.RunAsync();
