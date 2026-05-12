@@ -44,7 +44,7 @@ services:
       - SOCKET_PATH=/run/sock/api1.sock
       - CUSTOM_HTTP=1
       - NPROBE_FULL=5
-      - PROFILE_MIN_COUNT=8
+      - PROFILE_MIN_COUNT=15
       - UNANIMITY_SKIP=1
     volumes:
       - sock:/run/sock
@@ -66,7 +66,7 @@ services:
       - SOCKET_PATH=/run/sock/api2.sock
       - CUSTOM_HTTP=1
       - NPROBE_FULL=5
-      - PROFILE_MIN_COUNT=8
+      - PROFILE_MIN_COUNT=15
       - UNANIMITY_SKIP=1
     volumes:
       - sock:/run/sock
