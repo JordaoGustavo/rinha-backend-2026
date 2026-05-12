@@ -7,7 +7,7 @@
 
 services:
   lb:
-    image: jrblatt/so-no-forevis:v0.0.2
+    image: jrblatt/so-no-forevis:v1.0.0
     pull_policy: always
     restart: always
     depends_on:
@@ -43,6 +43,7 @@ services:
     environment:
       - SOCKET_PATH=/run/sock/api1.sock
       - CUSTOM_HTTP=1
+      - FD_PASSING=1
       - NPROBE_FULL=5
       - PROFILE_MIN_COUNT=15
       - UNANIMITY_SKIP=1
@@ -65,6 +66,7 @@ services:
     environment:
       - SOCKET_PATH=/run/sock/api2.sock
       - CUSTOM_HTTP=1
+      - FD_PASSING=1
       - NPROBE_FULL=5
       - PROFILE_MIN_COUNT=15
       - UNANIMITY_SKIP=1
