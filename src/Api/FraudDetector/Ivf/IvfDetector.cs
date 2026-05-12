@@ -379,30 +379,76 @@ public sealed unsafe class IvfDetector : IFraudDetector
 
         long t0 = ticksOut != null ? Stopwatch.GetTimestamp() : 0;
 
-        // Compute all K centroid distances in a single dim-major SIMD pass.
-        // Substitui o loop K × Int16L2Squared (horizontal reduce por
-        // cluster). Working-set por dim = K * 2 = 8 KB, cabe em L1
-        // Haswell (32 KB). Padding dims [D..pd) zeros não contribuem.
-        SimdDistance.Int16L2SquaredAllDimMajor(qInt, _centroidsT, centroidDist, numClusters, pd);
+        // Two-phase centroid scan: compute first 4 dim-pairs (64 KB, fits L1)
+        // for all K centroids, select top-32, then refine with remaining dims.
+        const int phase1Pd = 8;
+        const int phase1DimPairs = phase1Pd / 2;
+        const int totalDimPairs = pd / 2;
+        const int refineN = 32;
 
-        // Walk K distances and build the top-actualNprobe min-heap (by
-        // largest at root, so a new smaller dist can replace root).
+        SimdDistance.Int16L2SquaredAllDimMajor(qInt, _centroidsT, centroidDist, numClusters, phase1Pd);
+
+        int* refineIdx = stackalloc int[refineN];
+        int* refineDst = stackalloc int[refineN];
+        int refineCount = 0;
+
         for (int c = 0; c < numClusters; c++)
         {
+            int dist = centroidDist[c];
+            if (refineCount < refineN)
+            {
+                int pos = refineCount++;
+                refineIdx[pos] = c;
+                refineDst[pos] = dist;
+                int i = pos;
+                while (i > 0)
+                {
+                    int parent = (i - 1) >> 1;
+                    if (refineDst[parent] >= refineDst[i]) break;
+                    (refineIdx[parent], refineIdx[i]) = (refineIdx[i], refineIdx[parent]);
+                    (refineDst[parent], refineDst[i]) = (refineDst[i], refineDst[parent]);
+                    i = parent;
+                }
+            }
+            else if (dist < refineDst[0])
+            {
+                refineIdx[0] = c;
+                refineDst[0] = dist;
+                SiftDownProbe(refineIdx, refineDst, refineCount, 0);
+            }
+        }
+
+        for (int i = 0; i < refineCount; i++)
+        {
+            int c = refineIdx[i];
+            int extra = 0;
+            for (int dp = phase1DimPairs; dp < totalDimPairs; dp++)
+            {
+                short* pairBase = _centroidsT + (long)dp * numClusters * 2;
+                int d0 = pairBase[c * 2] - qInt[dp * 2];
+                int d1 = pairBase[c * 2 + 1] - qInt[dp * 2 + 1];
+                extra += d0 * d0 + d1 * d1;
+            }
+            centroidDist[c] += extra;
+        }
+
+        for (int i = 0; i < refineCount; i++)
+        {
+            int c = refineIdx[i];
             int dist = centroidDist[c];
             if (probeCount < actualNprobe)
             {
                 int pos = probeCount++;
                 probeList[pos] = c;
                 probeDists[pos] = dist;
-                int i = pos;
-                while (i > 0)
+                int j = pos;
+                while (j > 0)
                 {
-                    int parent = (i - 1) >> 1;
-                    if (probeDists[parent] >= probeDists[i]) break;
-                    (probeList[parent], probeList[i]) = (probeList[i], probeList[parent]);
-                    (probeDists[parent], probeDists[i]) = (probeDists[i], probeDists[parent]);
-                    i = parent;
+                    int parent = (j - 1) >> 1;
+                    if (probeDists[parent] >= probeDists[j]) break;
+                    (probeList[parent], probeList[j]) = (probeList[j], probeList[parent]);
+                    (probeDists[parent], probeDists[j]) = (probeDists[j], probeDists[parent]);
+                    j = parent;
                 }
             }
             else if (dist < probeDists[0])
