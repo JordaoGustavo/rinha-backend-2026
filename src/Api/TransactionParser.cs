@@ -1,4 +1,3 @@
-using System.Runtime.CompilerServices;
 using System.Text.Json;
 
 namespace Rinha.Api;
@@ -19,7 +18,7 @@ public static class TransactionParser
     public static void Initialize(string mccRiskPath, string normalizationPath)
     {
         Array.Fill(_mccRisk, _defaultMccRisk);
-        using var mccDoc = JsonDocument.Parse(File.ReadAllBytes(mccRiskPath));
+        using var mccDoc = System.Text.Json.JsonDocument.Parse(File.ReadAllBytes(mccRiskPath));
         foreach (var prop in mccDoc.RootElement.EnumerateObject())
         {
             int mcc = int.Parse(prop.Name);
@@ -27,7 +26,7 @@ public static class TransactionParser
                 _mccRisk[mcc] = prop.Value.GetSingle();
         }
 
-        using var normDoc = JsonDocument.Parse(File.ReadAllBytes(normalizationPath));
+        using var normDoc = System.Text.Json.JsonDocument.Parse(File.ReadAllBytes(normalizationPath));
         var root = normDoc.RootElement;
         _maxAmount = root.GetProperty("max_amount").GetDouble();
         _maxInstallments = root.GetProperty("max_installments").GetDouble();
@@ -38,14 +37,17 @@ public static class TransactionParser
         _maxMerchantAvgAmount = root.GetProperty("max_merchant_avg_amount").GetDouble();
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    [System.Runtime.CompilerServices.MethodImpl(
+        System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
     private static float GetMccRisk(int mcc) =>
         (uint)mcc < MccTableSize ? _mccRisk[mcc] : _defaultMccRisk;
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    [System.Runtime.CompilerServices.MethodImpl(
+        System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
     private static double ClampD(double x) => Math.Max(0.0, Math.Min(1.0, x));
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    [System.Runtime.CompilerServices.MethodImpl(
+        System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
     private static ulong FnvHash(ReadOnlySpan<byte> bytes)
     {
         ulong hash = 14695981039346656037UL;
@@ -57,312 +59,218 @@ public static class TransactionParser
         return hash;
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static double ParseDoubleManual(ReadOnlySpan<byte> span, int start, out int end)
-    {
-        int p = start;
-        bool neg = false;
-        if (p < span.Length && span[p] == '-') { neg = true; p++; }
-        long intPart = 0;
-        while (p < span.Length && (uint)(span[p] - '0') <= 9)
-        {
-            intPart = intPart * 10 + (span[p] - '0');
-            p++;
-        }
-        double result = intPart;
-        if (p < span.Length && span[p] == '.')
-        {
-            p++;
-            double frac = 0;
-            double div = 10.0;
-            while (p < span.Length && (uint)(span[p] - '0') <= 9)
-            {
-                frac += (span[p] - '0') / div;
-                div *= 10.0;
-                p++;
-            }
-            result += frac;
-        }
-        if (p < span.Length && (span[p] == 'e' || span[p] == 'E'))
-        {
-            p++;
-            bool expNeg = false;
-            if (p < span.Length && span[p] == '-') { expNeg = true; p++; }
-            else if (p < span.Length && span[p] == '+') { p++; }
-            int exp = 0;
-            while (p < span.Length && (uint)(span[p] - '0') <= 9)
-            {
-                exp = exp * 10 + (span[p] - '0');
-                p++;
-            }
-            result *= Math.Pow(10, expNeg ? -exp : exp);
-        }
-        end = p;
-        return neg ? -result : result;
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static int ParseIntManual(ReadOnlySpan<byte> span, int start, out int end)
-    {
-        int p = start;
-        int val = 0;
-        while (p < span.Length && (uint)(span[p] - '0') <= 9)
-        {
-            val = val * 10 + (span[p] - '0');
-            p++;
-        }
-        end = p;
-        return val;
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static int FindField(ReadOnlySpan<byte> json, int from, ReadOnlySpan<byte> fieldName)
-    {
-        int idx = json[from..].IndexOf(fieldName);
-        if (idx < 0) return -1;
-        return from + idx + fieldName.Length;
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static int SkipWhitespace(ReadOnlySpan<byte> json, int p)
-    {
-        while (p < json.Length && (json[p] == ' ' || json[p] == '\t' || json[p] == '\n' || json[p] == '\r'))
-            p++;
-        return p;
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static bool FindAndParseBool(ReadOnlySpan<byte> json, ReadOnlySpan<byte> fieldName, int from)
-    {
-        int pos = FindField(json, from, fieldName);
-        if (pos < 0) return false;
-        pos = SkipWhitespace(json, pos);
-        return pos < json.Length && json[pos] == 't';
-    }
-
     public static void Parse(ReadOnlySpan<byte> json, Span<float> vector)
     {
         vector.Clear();
 
-        // Transaction fields
         double txAmount = 0.0;
         int txInstallments = 0;
-        int txHour = 0, txMinute = 0, txSecond = 0;
-        int txYear = 0, txMonth = 0, txDay = 0;
+        int txYear = 0, txMonth = 0, txDay = 0, txHour = 0, txMinute = 0, txSecond = 0;
 
-        // Customer fields
         double custAvgAmount = 0.0;
         int custTxCount24h = 0;
 
-        // Merchant fields
+        Span<ulong> knownHashes = stackalloc ulong[32];
+        int knownCount = 0;
         ulong merchantIdHash = 0;
         bool hasMerchantId = false;
+
         int merchantMcc = -1;
         double merchantAvgAmount = 0.0;
 
-        // Terminal fields
         bool terminalIsOnline = false;
         bool terminalCardPresent = false;
         double terminalKmFromHome = 0.0;
 
-        // Last transaction fields
         bool hasLastTx = false;
         int lastYear = 0, lastMonth = 0, lastDay = 0, lastHour = 0, lastMinute = 0, lastSecond = 0;
         double lastTxKmFromCurrent = 0.0;
 
-        // Known merchants
-        Span<ulong> knownHashes = stackalloc ulong[32];
-        int knownCount = 0;
+        int ctx = 0;
+        int fieldId = 0;
+        bool inKnownMerchantsArray = false;
+        int rootFieldId = 0;
 
-        // --- transaction ---
-        int txPos = FindField(json, 0, "\"transaction\""u8);
-        if (txPos >= 0)
+        var reader = new Utf8JsonReader(json, isFinalBlock: true, state: default);
+
+        while (reader.Read())
         {
-            int amtPos = FindField(json, txPos, "\"amount\":"u8);
-            if (amtPos >= 0)
+            switch (reader.TokenType)
             {
-                amtPos = SkipWhitespace(json, amtPos);
-                txAmount = ParseDoubleManual(json, amtPos, out _);
-            }
-
-            int instPos = FindField(json, txPos, "\"installments\":"u8);
-            if (instPos >= 0)
-            {
-                instPos = SkipWhitespace(json, instPos);
-                txInstallments = ParseIntManual(json, instPos, out _);
-            }
-
-            int ratPos = FindField(json, txPos, "\"requested_at\":"u8);
-            if (ratPos >= 0)
-            {
-                ratPos = SkipWhitespace(json, ratPos);
-                if (ratPos < json.Length && json[ratPos] == '"') ratPos++;
-                if (ratPos + 19 <= json.Length)
-                {
-                    var ts = json.Slice(ratPos, 19);
-                    txYear   = (ts[0]-'0')*1000 + (ts[1]-'0')*100 + (ts[2]-'0')*10 + (ts[3]-'0');
-                    txMonth  = (ts[5]-'0')*10 + (ts[6]-'0');
-                    txDay    = (ts[8]-'0')*10 + (ts[9]-'0');
-                    txHour   = (ts[11]-'0')*10 + (ts[12]-'0');
-                    txMinute = (ts[14]-'0')*10 + (ts[15]-'0');
-                    txSecond = (ts[17]-'0')*10 + (ts[18]-'0');
-                }
-            }
-        }
-
-        // --- customer ---
-        int custPos = FindField(json, 0, "\"customer\""u8);
-        if (custPos >= 0)
-        {
-            int avgPos = FindField(json, custPos, "\"avg_amount\":"u8);
-            if (avgPos >= 0)
-            {
-                avgPos = SkipWhitespace(json, avgPos);
-                custAvgAmount = ParseDoubleManual(json, avgPos, out _);
-            }
-
-            int tcPos = FindField(json, custPos, "\"tx_count_24h\":"u8);
-            if (tcPos >= 0)
-            {
-                tcPos = SkipWhitespace(json, tcPos);
-                custTxCount24h = ParseIntManual(json, tcPos, out _);
-            }
-
-            // known_merchants array
-            int kmPos = FindField(json, custPos, "\"known_merchants\":"u8);
-            if (kmPos >= 0)
-            {
-                kmPos = SkipWhitespace(json, kmPos);
-                if (kmPos < json.Length && json[kmPos] == '[')
-                {
-                    kmPos++;
-                    while (kmPos < json.Length && knownCount < 32)
+                case JsonTokenType.PropertyName:
+                    fieldId = 0;
+                    if (ctx == 0)
                     {
-                        kmPos = SkipWhitespace(json, kmPos);
-                        if (kmPos >= json.Length || json[kmPos] == ']') break;
-                        if (json[kmPos] == ',') { kmPos++; continue; }
-                        if (json[kmPos] == '"')
+                        if      (reader.ValueTextEquals("transaction"u8))     { fieldId = 10; rootFieldId = 10; }
+                        else if (reader.ValueTextEquals("customer"u8))         { fieldId = 11; rootFieldId = 11; }
+                        else if (reader.ValueTextEquals("merchant"u8))         { fieldId = 12; rootFieldId = 12; }
+                        else if (reader.ValueTextEquals("terminal"u8))         { fieldId = 13; rootFieldId = 13; }
+                        else if (reader.ValueTextEquals("last_transaction"u8)) { fieldId = 14; rootFieldId = 14; }
+                    }
+                    else if (ctx == 1)
+                    {
+                        if      (reader.ValueTextEquals("amount"u8))       fieldId = 1;
+                        else if (reader.ValueTextEquals("installments"u8)) fieldId = 2;
+                        else if (reader.ValueTextEquals("requested_at"u8)) fieldId = 3;
+                    }
+                    else if (ctx == 2)
+                    {
+                        if      (reader.ValueTextEquals("avg_amount"u8))      fieldId = 4;
+                        else if (reader.ValueTextEquals("tx_count_24h"u8))    fieldId = 5;
+                        else if (reader.ValueTextEquals("known_merchants"u8)) fieldId = 6;
+                    }
+                    else if (ctx == 3)
+                    {
+                        if      (reader.ValueTextEquals("id"u8))         fieldId = 7;
+                        else if (reader.ValueTextEquals("mcc"u8))        fieldId = 8;
+                        else if (reader.ValueTextEquals("avg_amount"u8)) fieldId = 9;
+                    }
+                    else if (ctx == 4)
+                    {
+                        if      (reader.ValueTextEquals("is_online"u8))    fieldId = 15;
+                        else if (reader.ValueTextEquals("card_present"u8)) fieldId = 16;
+                        else if (reader.ValueTextEquals("km_from_home"u8)) fieldId = 17;
+                    }
+                    else if (ctx == 5)
+                    {
+                        if      (reader.ValueTextEquals("timestamp"u8))      fieldId = 18;
+                        else if (reader.ValueTextEquals("km_from_current"u8)) fieldId = 19;
+                    }
+                    break;
+
+                case JsonTokenType.StartObject:
+                    if (ctx == 0)
+                    {
+                        switch (fieldId)
                         {
-                            kmPos++;
-                            int strEnd = json[kmPos..].IndexOf((byte)'"');
-                            if (strEnd >= 0)
-                            {
-                                knownHashes[knownCount++] = FnvHash(json.Slice(kmPos, strEnd));
-                                kmPos += strEnd + 1;
-                            }
-                            else break;
+                            case 10: ctx = 1; break;
+                            case 11: ctx = 2; break;
+                            case 12: ctx = 3; break;
+                            case 13: ctx = 4; break;
+                            case 14: ctx = 5; hasLastTx = true; break;
                         }
-                        else break;
+                        fieldId = 0;
                     }
-                }
-            }
-        }
+                    break;
 
-        // --- merchant ---
-        int mPos = FindField(json, 0, "\"merchant\""u8);
-        if (mPos >= 0)
-        {
-            int idPos = FindField(json, mPos, "\"id\":"u8);
-            if (idPos >= 0)
-            {
-                idPos = SkipWhitespace(json, idPos);
-                if (idPos < json.Length && json[idPos] == '"')
-                {
-                    idPos++;
-                    int strEnd = json[idPos..].IndexOf((byte)'"');
-                    if (strEnd >= 0)
+                case JsonTokenType.EndObject:
+                    if (ctx != 0) ctx = 0;
+                    break;
+
+                case JsonTokenType.StartArray:
+                    if (ctx == 2 && fieldId == 6)
                     {
-                        merchantIdHash = FnvHash(json.Slice(idPos, strEnd));
-                        hasMerchantId = true;
+                        inKnownMerchantsArray = true;
+                        fieldId = 0;
                     }
-                }
-            }
+                    break;
 
-            int mccPos = FindField(json, mPos, "\"mcc\":"u8);
-            if (mccPos >= 0)
-            {
-                mccPos = SkipWhitespace(json, mccPos);
-                if (mccPos < json.Length && json[mccPos] == '"')
-                {
-                    mccPos++;
-                    merchantMcc = ParseIntManual(json, mccPos, out _);
-                }
-                else
-                {
-                    merchantMcc = ParseIntManual(json, mccPos, out _);
-                }
-            }
+                case JsonTokenType.EndArray:
+                    inKnownMerchantsArray = false;
+                    break;
 
-            // merchant avg_amount — search after mcc to avoid matching customer avg_amount
-            int maPos = FindField(json, mPos, "\"avg_amount\":"u8);
-            if (maPos >= 0)
-            {
-                maPos = SkipWhitespace(json, maPos);
-                merchantAvgAmount = ParseDoubleManual(json, maPos, out _);
-            }
-        }
+                case JsonTokenType.Null:
+                    if (ctx == 0 && rootFieldId == 14)
+                        hasLastTx = false;
+                    break;
 
-        // --- terminal ---
-        int tPos = FindField(json, 0, "\"terminal\""u8);
-        if (tPos >= 0)
-        {
-            terminalIsOnline = FindAndParseBool(json, "\"is_online\":"u8, tPos);
-            terminalCardPresent = FindAndParseBool(json, "\"card_present\":"u8, tPos);
-
-            int kmhPos = FindField(json, tPos, "\"km_from_home\":"u8);
-            if (kmhPos >= 0)
-            {
-                kmhPos = SkipWhitespace(json, kmhPos);
-                terminalKmFromHome = ParseDoubleManual(json, kmhPos, out _);
-            }
-        }
-
-        // --- last_transaction ---
-        int ltPos = FindField(json, 0, "\"last_transaction\""u8);
-        if (ltPos >= 0)
-        {
-            ltPos = SkipWhitespace(json, ltPos);
-            // Skip the colon
-            if (ltPos < json.Length && json[ltPos] == ':') ltPos++;
-            ltPos = SkipWhitespace(json, ltPos);
-
-            if (ltPos < json.Length && json[ltPos] != 'n') // not null
-            {
-                hasLastTx = true;
-
-                int tsPos = FindField(json, ltPos, "\"timestamp\":"u8);
-                if (tsPos >= 0)
-                {
-                    tsPos = SkipWhitespace(json, tsPos);
-                    if (tsPos < json.Length && json[tsPos] == '"') tsPos++;
-                    if (tsPos + 19 <= json.Length)
+                case JsonTokenType.String:
+                    if (inKnownMerchantsArray)
                     {
-                        var ts = json.Slice(tsPos, 19);
-                        lastYear   = (ts[0]-'0')*1000 + (ts[1]-'0')*100 + (ts[2]-'0')*10 + (ts[3]-'0');
-                        lastMonth  = (ts[5]-'0')*10 + (ts[6]-'0');
-                        lastDay    = (ts[8]-'0')*10 + (ts[9]-'0');
-                        lastHour   = (ts[11]-'0')*10 + (ts[12]-'0');
-                        lastMinute = (ts[14]-'0')*10 + (ts[15]-'0');
-                        lastSecond = (ts[17]-'0')*10 + (ts[18]-'0');
+                        if (knownCount < 32)
+                            knownHashes[knownCount++] = FnvHash(reader.ValueSpan);
+                        break;
                     }
-                }
+                    switch (ctx)
+                    {
+                        case 1:
+                            if (fieldId == 3)
+                            {
+                                var span = reader.ValueSpan;
+                                if (span.Length >= 19)
+                                {
+                                    txYear   = (span[0]-'0')*1000 + (span[1]-'0')*100 + (span[2]-'0')*10 + (span[3]-'0');
+                                    txMonth  = (span[5]-'0')*10 + (span[6]-'0');
+                                    txDay    = (span[8]-'0')*10 + (span[9]-'0');
+                                    txHour   = (span[11]-'0')*10 + (span[12]-'0');
+                                    txMinute = (span[14]-'0')*10 + (span[15]-'0');
+                                    txSecond = (span[17]-'0')*10 + (span[18]-'0');
+                                }
+                            }
+                            break;
+                        case 3:
+                            if (fieldId == 7)
+                            {
+                                merchantIdHash = FnvHash(reader.ValueSpan);
+                                hasMerchantId = true;
+                            }
+                            else if (fieldId == 8)
+                            {
+                                if (int.TryParse(reader.ValueSpan, out int mccVal))
+                                    merchantMcc = mccVal;
+                            }
+                            break;
+                        case 5:
+                            if (fieldId == 18)
+                            {
+                                var span = reader.ValueSpan;
+                                if (span.Length >= 19)
+                                {
+                                    lastYear   = (span[0]-'0')*1000 + (span[1]-'0')*100 + (span[2]-'0')*10 + (span[3]-'0');
+                                    lastMonth  = (span[5]-'0')*10 + (span[6]-'0');
+                                    lastDay    = (span[8]-'0')*10 + (span[9]-'0');
+                                    lastHour   = (span[11]-'0')*10 + (span[12]-'0');
+                                    lastMinute = (span[14]-'0')*10 + (span[15]-'0');
+                                    lastSecond = (span[17]-'0')*10 + (span[18]-'0');
+                                }
+                            }
+                            break;
+                    }
+                    break;
 
-                int kmcPos = FindField(json, ltPos, "\"km_from_current\":"u8);
-                if (kmcPos >= 0)
-                {
-                    kmcPos = SkipWhitespace(json, kmcPos);
-                    lastTxKmFromCurrent = ParseDoubleManual(json, kmcPos, out _);
-                }
+                case JsonTokenType.Number:
+                    switch (ctx)
+                    {
+                        case 1:
+                            if (fieldId == 1)      txAmount = reader.GetDouble();
+                            else if (fieldId == 2) txInstallments = reader.GetInt32();
+                            break;
+                        case 2:
+                            if (fieldId == 4)      custAvgAmount = reader.GetDouble();
+                            else if (fieldId == 5) custTxCount24h = reader.GetInt32();
+                            break;
+                        case 3:
+                            if (fieldId == 9) merchantAvgAmount = reader.GetDouble();
+                            break;
+                        case 4:
+                            if (fieldId == 17) terminalKmFromHome = reader.GetDouble();
+                            break;
+                        case 5:
+                            if (fieldId == 19) lastTxKmFromCurrent = reader.GetDouble();
+                            break;
+                    }
+                    break;
+
+                case JsonTokenType.True:
+                case JsonTokenType.False:
+                    if (ctx == 4)
+                    {
+                        bool val = reader.TokenType == JsonTokenType.True;
+                        if (fieldId == 15)      terminalIsOnline = val;
+                        else if (fieldId == 16) terminalCardPresent = val;
+                    }
+                    break;
             }
         }
 
-        // --- Build feature vector (same logic as original) ---
-
-        // Day-of-week via Zeller's congruence
+        // Day-of-week via Zeller's congruence (gregoriano) — evita
+        // alocação de DateTime + lookup de DayOfWeek (~50–80 ns vs ~5 ns).
+        // Equivalência verificada em TransactionParserTests para 2024..2027.
         int zZ, zC, zM;
         if (txMonth < 3) { zZ = (txYear - 1) % 100; zC = (txYear - 1) / 100; zM = txMonth + 12; }
         else             { zZ = txYear       % 100; zC = txYear       / 100; zM = txMonth;       }
         int zH = (txDay + 13 * (zM + 1) / 5 + zZ + zZ / 4 + zC / 4 + 5 * zC) % 7;
+        // zH: 0=Sat, 1=Sun, 2=Mon, ..., 6=Fri. Mon-based 0..6 = (zH+5) % 7.
         int monBased = (zH + 5) % 7;
 
         vector[0] = (float)Math.Round(ClampD(txAmount / _maxAmount), 4);
@@ -375,6 +283,9 @@ public static class TransactionParser
 
         if (hasLastTx)
         {
+            // Aritmética escalar quando mesmo mês/ano (caso comum no rinha 2026
+            // que tem last_tx geralmente <24h antes). Fallback para DateTime
+            // só em cross-month/year.
             double minutes;
             if (txYear == lastYear && txMonth == lastMonth)
             {

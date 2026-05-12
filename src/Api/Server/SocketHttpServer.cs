@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Diagnostics;
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
@@ -61,56 +62,39 @@ public sealed class SocketHttpServer : IDisposable
         }
     }
 
-    [ThreadStatic] private static byte[]? t_buffer;
-
     private async Task HandleConnectionAsync(Socket client)
     {
-        byte[] buffer = t_buffer ?? new byte[4096];
-        t_buffer = null;
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(4096);
         int filled = 0;
         try
         {
             while (true)
             {
-                // Spin-receive: UDS requests typically arrive within microseconds.
-                // Synchronous Poll+Receive avoids the ValueTask state machine overhead
-                // (~30-60us per request on constrained CFS quota).
-                int read = 0;
-                SpinWait spinner = default;
-                for (int attempt = 0; attempt < 12; attempt++)
-                {
-                    if (client.Poll(0, SelectMode.SelectRead))
-                    {
-                        read = client.Receive(buffer, filled, buffer.Length - filled, SocketFlags.None);
-                        break;
-                    }
-                    spinner.SpinOnce();
-                }
-                if (read == 0)
-                {
-                    read = await client.ReceiveAsync(buffer.AsMemory(filled), SocketFlags.None, _cts.Token);
-                }
-                if (read == 0) return;
+                int read = await client.ReceiveAsync(buffer.AsMemory(filled), SocketFlags.None, _cts.Token);
+                if (read == 0) return; // client closed
                 filled += read;
 
+                // Drain all complete pipelined requests already in the buffer
+                // before going back to the kernel for more bytes.
                 while (filled > 0)
                 {
                     int parsed = TryProcessOne(client, buffer.AsSpan(0, filled));
-                    if (parsed < 0) return;
-                    if (parsed == 0) break;
+                    if (parsed < 0) return;        // protocol error / explicit close
+                    if (parsed == 0) break;        // need more bytes
                     int remaining = filled - parsed;
                     if (remaining > 0)
                         Buffer.BlockCopy(buffer, parsed, buffer, 0, remaining);
                     filled = remaining;
                 }
 
+                // Buffer full and no progress made → request larger than 8 KB. Drop.
                 if (filled == buffer.Length) return;
             }
         }
         catch { /* connection-level errors are non-fatal */ }
         finally
         {
-            t_buffer = buffer;
+            ArrayPool<byte>.Shared.Return(buffer);
             try { client.Shutdown(SocketShutdown.Both); } catch { }
             client.Dispose();
         }
