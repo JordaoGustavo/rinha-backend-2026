@@ -53,7 +53,7 @@ services:
       resources:
         limits:
           cpus: "0.45"
-          memory: "170MB"
+          memory: "162.5MB"
     security_opt:
       - seccomp:unconfined
     networks:
@@ -75,7 +75,7 @@ services:
       resources:
         limits:
           cpus: "0.45"
-          memory: "170MB"
+          memory: "162.5MB"
     security_opt:
       - seccomp:unconfined
     networks:
