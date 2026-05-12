@@ -41,73 +41,118 @@ public sealed class SocketHttpServer : IDisposable
             UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute);
     }
 
+    private sealed class Conn : IDisposable
+    {
+        public readonly Socket Socket;
+        public readonly byte[] Buffer;
+        public int Filled;
+
+        public Conn(Socket socket)
+        {
+            Socket = socket;
+            Buffer = ArrayPool<byte>.Shared.Rent(4096);
+        }
+
+        public void Dispose()
+        {
+            ArrayPool<byte>.Shared.Return(Buffer);
+            try { Socket.Shutdown(SocketShutdown.Both); } catch { }
+            Socket.Dispose();
+        }
+    }
+
     public Task RunAsync()
     {
         var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var acceptThread = new Thread(() =>
+        var thread = new Thread(() =>
         {
-            try { AcceptLoop(); }
+            try { EventLoop(); }
             finally { tcs.TrySetResult(); }
         })
         {
             IsBackground = true,
-            Name = "accept-loop"
+            Name = "event-loop"
         };
-        acceptThread.Start();
+        thread.Start();
         return tcs.Task;
     }
 
-    private void AcceptLoop()
+    private void EventLoop()
     {
+        _listener.Blocking = false;
+        var conns = new Dictionary<Socket, Conn>();
+        var checkRead = new List<Socket>();
+        var toClose = new List<Socket>();
+
         while (!_cts.IsCancellationRequested)
         {
-            Socket client;
-            try { client = _listener.Accept(); }
+            checkRead.Clear();
+            checkRead.Add(_listener);
+            foreach (var (sock, _) in conns)
+                checkRead.Add(sock);
+
+            try { Socket.Select(checkRead, null, null, 100_000); }
             catch { break; }
 
-            var thread = new Thread(HandleConnectionSync)
-            {
-                IsBackground = true,
-                Name = "conn-handler"
-            };
-            thread.Start(client);
-        }
-    }
+            if (checkRead.Count == 0) continue;
 
-    private void HandleConnectionSync(object? state)
-    {
-        var client = (Socket)state!;
-        byte[] buffer = ArrayPool<byte>.Shared.Rent(4096);
-        int filled = 0;
-        try
-        {
-            while (true)
-            {
-                int read = client.Receive(buffer, filled, buffer.Length - filled, SocketFlags.None);
-                if (read == 0) return;
-                filled += read;
+            toClose.Clear();
 
-                while (filled > 0)
+            foreach (var sock in checkRead)
+            {
+                if (sock == _listener)
                 {
-                    int parsed = TryProcessOne(client, buffer.AsSpan(0, filled));
-                    if (parsed < 0) return;
-                    if (parsed == 0) break;
-                    int remaining = filled - parsed;
-                    if (remaining > 0)
-                        Buffer.BlockCopy(buffer, parsed, buffer, 0, remaining);
-                    filled = remaining;
+                    while (true)
+                    {
+                        Socket client;
+                        try { client = _listener.Accept(); }
+                        catch (SocketException) { break; }
+                        conns[client] = new Conn(client);
+                    }
+                    continue;
                 }
 
-                if (filled == buffer.Length) return;
+                if (conns.TryGetValue(sock, out var conn) && !DrainConnection(conn))
+                    toClose.Add(sock);
+            }
+
+            foreach (var sock in toClose)
+            {
+                if (conns.Remove(sock, out var c))
+                    c.Dispose();
             }
         }
-        catch { }
-        finally
+
+        foreach (var (_, c) in conns)
+            c.Dispose();
+    }
+
+    private bool DrainConnection(Conn conn)
+    {
+        int read;
+        try
         {
-            ArrayPool<byte>.Shared.Return(buffer);
-            try { client.Shutdown(SocketShutdown.Both); } catch { }
-            client.Dispose();
+            read = conn.Socket.Receive(conn.Buffer, conn.Filled,
+                conn.Buffer.Length - conn.Filled, SocketFlags.None);
         }
+        catch { return false; }
+
+        if (read == 0) return false;
+        conn.Filled += read;
+
+        while (conn.Filled > 0)
+        {
+            int parsed = TryProcessOne(conn.Socket, conn.Buffer.AsSpan(0, conn.Filled));
+            if (parsed < 0) return false;
+            if (parsed == 0) break;
+            int remaining = conn.Filled - parsed;
+            if (remaining > 0)
+                System.Buffer.BlockCopy(conn.Buffer, parsed, conn.Buffer, 0, remaining);
+            conn.Filled = remaining;
+        }
+
+        if (conn.Filled == conn.Buffer.Length) return false;
+        return true;
     }
 
     private int TryProcessOne(Socket client, ReadOnlySpan<byte> data)
