@@ -41,57 +41,67 @@ public sealed class SocketHttpServer : IDisposable
             UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute);
     }
 
-    public async Task RunAsync()
+    public Task RunAsync()
+    {
+        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var acceptThread = new Thread(() =>
+        {
+            try { AcceptLoop(); }
+            finally { tcs.TrySetResult(); }
+        })
+        {
+            IsBackground = true,
+            Name = "accept-loop"
+        };
+        acceptThread.Start();
+        return tcs.Task;
+    }
+
+    private void AcceptLoop()
     {
         while (!_cts.IsCancellationRequested)
         {
             Socket client;
-            try { client = await _listener.AcceptAsync(_cts.Token); }
-            catch (OperationCanceledException) { break; }
+            try { client = _listener.Accept(); }
+            catch { break; }
 
-            // ThreadPool.UnsafeQueueUserWorkItem em vez de Task.Run: evita
-            // alocação de Task object + state machine por conexão. Sob 100
-            // VUs com keepalive (k6 oficial) isso elimina dezenas de
-            // alocações/seg que pressionavam o GC e geravam contention de
-            // ThreadPool. Visto no daniloitagyba/rinha-2026-dotnet
-            // (SERVER_MODE=raw → UnsafeQueueUserWorkItem).
-            ThreadPool.UnsafeQueueUserWorkItem(
-                static s => _ = s.server.HandleConnectionAsync(s.client),
-                (server: this, client),
-                preferLocal: false);
+            var thread = new Thread(HandleConnectionSync)
+            {
+                IsBackground = true,
+                Name = "conn-handler"
+            };
+            thread.Start(client);
         }
     }
 
-    private async Task HandleConnectionAsync(Socket client)
+    private void HandleConnectionSync(object? state)
     {
+        var client = (Socket)state!;
         byte[] buffer = ArrayPool<byte>.Shared.Rent(4096);
         int filled = 0;
         try
         {
             while (true)
             {
-                int read = await client.ReceiveAsync(buffer.AsMemory(filled), SocketFlags.None, _cts.Token);
-                if (read == 0) return; // client closed
+                int read = client.Receive(buffer, filled, buffer.Length - filled, SocketFlags.None);
+                if (read == 0) return;
                 filled += read;
 
-                // Drain all complete pipelined requests already in the buffer
-                // before going back to the kernel for more bytes.
                 while (filled > 0)
                 {
                     int parsed = TryProcessOne(client, buffer.AsSpan(0, filled));
-                    if (parsed < 0) return;        // protocol error / explicit close
-                    if (parsed == 0) break;        // need more bytes
+                    if (parsed < 0) return;
+                    if (parsed == 0) break;
                     int remaining = filled - parsed;
                     if (remaining > 0)
                         Buffer.BlockCopy(buffer, parsed, buffer, 0, remaining);
                     filled = remaining;
                 }
 
-                // Buffer full and no progress made → request larger than 8 KB. Drop.
                 if (filled == buffer.Length) return;
             }
         }
-        catch { /* connection-level errors are non-fatal */ }
+        catch { }
         finally
         {
             ArrayPool<byte>.Shared.Return(buffer);
