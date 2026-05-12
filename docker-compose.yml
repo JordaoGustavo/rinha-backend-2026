@@ -48,12 +48,12 @@ services:
       - UNANIMITY_SKIP=1
     volumes:
       - sock:/run/sock
-    cpuset: "1,2"
+    cpuset: "1"
     deploy:
       resources:
         limits:
           cpus: "0.45"
-          memory: "162.5MB"
+          memory: "170MB"
     security_opt:
       - seccomp:unconfined
     networks:
@@ -70,12 +70,12 @@ services:
       - UNANIMITY_SKIP=1
     volumes:
       - sock:/run/sock
-    cpuset: "2,3"
+    cpuset: "3"
     deploy:
       resources:
         limits:
           cpus: "0.45"
-          memory: "162.5MB"
+          memory: "170MB"
     security_opt:
       - seccomp:unconfined
     networks:
