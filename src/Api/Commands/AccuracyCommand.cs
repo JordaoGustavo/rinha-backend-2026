@@ -102,11 +102,14 @@ public static class AccuracyCommand
         Console.WriteLine($"oracle avg latency:      {oracleMs:F3} ms");
         if (fpTotal > 0)
         {
+            long rerankSkips = IvfDetector.RerankSkips;
             Console.WriteLine();
             Console.WriteLine($"profile fast-path hits:  {fpHits} / {fpTotal} ({100.0 * fpHits / fpTotal:F2}%)");
             Console.WriteLine($"  → legit hits:          {fpLegit} ({100.0 * fpLegit / fpTotal:F2}%)");
             Console.WriteLine($"  → fraud hits:          {fpFraud} ({100.0 * fpFraud / fpTotal:F2}%)");
             Console.WriteLine($"  → misses (IVF ran):    {fpMiss} ({100.0 * fpMiss / fpTotal:F2}%)");
+            if (fpMiss > 0)
+                Console.WriteLine($"  → rerank skips:        {rerankSkips} / {fpMiss} ({100.0 * rerankSkips / fpMiss:F2}%)");
         }
         Console.WriteLine();
         if (firstFailures.Count > 0)
