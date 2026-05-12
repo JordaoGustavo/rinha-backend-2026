@@ -2,9 +2,8 @@
 # Resources match the rinha rules: 1 CPU and 350 MB total; 1 LB + 2 API
 # replicas; bridge network; port 9999; no business logic on the LB.
 #
-# CPU split: LB 0.15 + API 0.425 × 2 = 1.00. so-no-forevis at TCP splice
-# uses ~30µs/req — 0.15 CPU is plenty at 900 req/s peak. Extra 0.025/API
-# reduces CFS throttle probability on IVF queries.
+# CPU split: LB 0.10 + API 0.45 × 2 = 1.00. so-no-forevis at TCP splice
+# uses ~0.027 CPU at 900 req/s. 0.10 has 3.7x headroom.
 
 services:
   lb:
@@ -27,8 +26,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.15"
-          memory: "40MB"
+          cpus: "0.10"
+          memory: "25MB"
     ulimits:
       nofile:
         soft: 65535
@@ -45,15 +44,14 @@ services:
       - SOCKET_PATH=/run/sock/api1.sock
       - CUSTOM_HTTP=1
       - NPROBE_FULL=5
-      - UNANIMITY_SKIP=1
     volumes:
       - sock:/run/sock
     cpuset: "1,2"
     deploy:
       resources:
         limits:
-          cpus: "0.425"
-          memory: "155MB"
+          cpus: "0.45"
+          memory: "162.5MB"
     security_opt:
       - seccomp:unconfined
     networks:
@@ -66,15 +64,14 @@ services:
       - SOCKET_PATH=/run/sock/api2.sock
       - CUSTOM_HTTP=1
       - NPROBE_FULL=5
-      - UNANIMITY_SKIP=1
     volumes:
       - sock:/run/sock
     cpuset: "2,3"
     deploy:
       resources:
         limits:
-          cpus: "0.425"
-          memory: "155MB"
+          cpus: "0.45"
+          memory: "162.5MB"
     security_opt:
       - seccomp:unconfined
     networks:
