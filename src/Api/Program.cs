@@ -26,6 +26,8 @@ if (args.Length > 0)
         "preprocess"  => PreprocessCommand.Run(args[1..]),
         "accuracy"    => AccuracyCommand.Run(args[1..]),
         "gen-warmup"  => GenWarmupCommand.Run(args[1..]),
+        "timing"        => TimingCommand.Run(args[1..]),
+        "profile-sweep" => ProfileSweepCommand.Run(args[1..]),
         _ => throw new ArgumentException($"Unknown command: {args[0]}")
     };
 }
