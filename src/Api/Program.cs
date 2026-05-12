@@ -36,11 +36,21 @@ TransactionParser.Initialize(
     Path.Combine(resourcesPath, "normalization.json"));
 
 var dataPath = Environment.GetEnvironmentVariable("INDEX_PATH") ?? "/data/ivf.bin";
+var exactPath = Environment.GetEnvironmentVariable("EXACT_PATH");
 var port = Environment.GetEnvironmentVariable("API_PORT") ?? "8080";
 var socketPath = Environment.GetEnvironmentVariable("SOCKET_PATH");
 
 Console.WriteLine($"Opening index from {dataPath}...");
-var detector = IFraudDetector.Open(dataPath);
+IFraudDetector detector;
+if (!string.IsNullOrEmpty(exactPath) && File.Exists(exactPath))
+{
+    Console.WriteLine($"  with exact float32 rerank from {exactPath}");
+    detector = IvfDetector.OpenWithExactRerank(dataPath, exactPath);
+}
+else
+{
+    detector = IFraudDetector.Open(dataPath);
+}
 Console.WriteLine($"Loaded {detector.NumVectors} vectors, {detector.NumClusters} clusters — {detector.Description}");
 Console.WriteLine("Prefaulting pages...");
 detector.Prefault();
