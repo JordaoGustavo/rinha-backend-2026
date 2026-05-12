@@ -44,7 +44,7 @@ services:
     environment:
       - SOCKET_PATH=/run/sock/api1.sock
       - CUSTOM_HTTP=1
-      - NPROBE_FULL=5
+      - NPROBE_FULL=4
       - UNANIMITY_SKIP=1
     volumes:
       - sock:/run/sock
@@ -65,7 +65,7 @@ services:
     environment:
       - SOCKET_PATH=/run/sock/api2.sock
       - CUSTOM_HTTP=1
-      - NPROBE_FULL=5
+      - NPROBE_FULL=4
       - UNANIMITY_SKIP=1
     volumes:
       - sock:/run/sock
