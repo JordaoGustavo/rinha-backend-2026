@@ -67,6 +67,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
     public static long ProfileFastPathLegitHits;
     public static long ProfileFastPathFraudHits;
     public static long ProfileFastPathMisses;
+    public static long RerankSkips;
 
     /// <summary>
     /// Quantos dim-pairs a pass de early-exit do ScanClusterAvx2 acumula
@@ -280,60 +281,78 @@ public sealed unsafe class IvfDetector : IFraudDetector
 
             long s2Start = ticksOut != null ? Stopwatch.GetTimestamp() : 0;
 
-            float* exactVecs = _exactVectors;
+            int candidateFraud = 0;
+            for (int i = 0; i < candidateCount; i++)
+                candidateFraud += _labels[candidateIdx[i]];
 
-            if (exactVecs != null)
+            // With C candidates picking top 5: min possible fraud =
+            // max(0, F-(C-5)), max = min(F,5). If both sides of the
+            // threshold (3) agree, the decision is deterministic and
+            // we skip the expensive float32 rerank (6 random page faults
+            // on the 180 MB exact.bin).
+            int maxPossibleFraud = Math.Min(candidateFraud, 5);
+            int minPossibleFraud = Math.Max(0, candidateFraud - (candidateCount - 5));
+
+            if (maxPossibleFraud < 3 || minPossibleFraud >= 3)
             {
-                // Float32 rerank using exact.bin — original float32 vectors
-                // give genuine higher precision than dequantized int16.
-                int* origIdx = _originalIndices;
-                int topSize = 0;
-                for (int i = 0; i < candidateCount; i++)
-                {
-                    int vecIdx = candidateIdx[i];
-                    int origGlobalIdx = origIdx[vecIdx];
-                    float dist = SimdDistance.EuclideanSquaredPtr(qFloat, exactVecs + (long)origGlobalIdx * pd);
-
-                    if (topSize < 5)
-                    {
-                        int p = topSize - 1;
-                        while (p >= 0 && topDist[p] > dist)
-                        {
-                            topDist[p + 1] = topDist[p];
-                            topIdx[p + 1]  = topIdx[p];
-                            p--;
-                        }
-                        topDist[p + 1] = dist;
-                        topIdx[p + 1]  = vecIdx;
-                        topSize++;
-                    }
-                    else if (dist < topDist[4])
-                    {
-                        int p = 3;
-                        while (p >= 0 && topDist[p] > dist)
-                        {
-                            topDist[p + 1] = topDist[p];
-                            topIdx[p + 1]  = topIdx[p];
-                            p--;
-                        }
-                        topDist[p + 1] = dist;
-                        topIdx[p + 1]  = vecIdx;
-                    }
-                }
-
-                fraudCount = 0;
-                for (int i = 0; i < topSize; i++)
-                    fraudCount += _labels[topIdx[i]];
-            }
-            else
-            {
-                // Int16 ranking is monotonically equivalent to dequantized
-                // float32 (dividing by scale² preserves order). Skip the
-                // float-domain recompute and random mmap reads entirely.
+                RerankSkips++;
                 int topK = Math.Min(candidateCount, 5);
                 fraudCount = 0;
                 for (int i = 0; i < topK; i++)
                     fraudCount += _labels[candidateIdx[i]];
+            }
+            else
+            {
+                float* exactVecs = _exactVectors;
+
+                if (exactVecs != null)
+                {
+                    int* origIdx = _originalIndices;
+                    int topSize = 0;
+                    for (int i = 0; i < candidateCount; i++)
+                    {
+                        int vecIdx = candidateIdx[i];
+                        int origGlobalIdx = origIdx[vecIdx];
+                        float dist = SimdDistance.EuclideanSquaredPtr(qFloat, exactVecs + (long)origGlobalIdx * pd);
+
+                        if (topSize < 5)
+                        {
+                            int p = topSize - 1;
+                            while (p >= 0 && topDist[p] > dist)
+                            {
+                                topDist[p + 1] = topDist[p];
+                                topIdx[p + 1]  = topIdx[p];
+                                p--;
+                            }
+                            topDist[p + 1] = dist;
+                            topIdx[p + 1]  = vecIdx;
+                            topSize++;
+                        }
+                        else if (dist < topDist[4])
+                        {
+                            int p = 3;
+                            while (p >= 0 && topDist[p] > dist)
+                            {
+                                topDist[p + 1] = topDist[p];
+                                topIdx[p + 1]  = topIdx[p];
+                                p--;
+                            }
+                            topDist[p + 1] = dist;
+                            topIdx[p + 1]  = vecIdx;
+                        }
+                    }
+
+                    fraudCount = 0;
+                    for (int i = 0; i < topSize; i++)
+                        fraudCount += _labels[topIdx[i]];
+                }
+                else
+                {
+                    int topK = Math.Min(candidateCount, 5);
+                    fraudCount = 0;
+                    for (int i = 0; i < topK; i++)
+                        fraudCount += _labels[candidateIdx[i]];
+                }
             }
 
             if (ticksOut != null)
