@@ -30,7 +30,7 @@ services:
       # 100% accuracy (lb-skip in the repair pass absorbs the loss). Floor at
       # nprobe=3; <3 inflates because the heap starts empty too long for the
       # repair pass to skip much.
-      - NPROBE_FULL=4
+      - NPROBE_FULL=5
       # Kestrel bypass: SocketHttpServer raw HTTP/1.1 sobre UDS.
       - CUSTOM_HTTP=1
       - PROFILE_MIN_COUNT=8
@@ -55,7 +55,7 @@ services:
       - INDEX_PATH=${INDEX_PATH:-/data/ivf.bin}
       - SERVER_TIMING=${SERVER_TIMING:-0}
       - SOCKET_PATH=/run/sock/api2.sock
-      - NPROBE_FULL=4
+      - NPROBE_FULL=5
       # Kestrel bypass: SocketHttpServer raw HTTP/1.1 sobre UDS.
       - CUSTOM_HTTP=1
       - PROFILE_MIN_COUNT=8
