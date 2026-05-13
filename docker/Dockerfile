@@ -8,6 +8,10 @@
 FROM mcr.microsoft.com/dotnet/sdk:11.0-preview AS build
 ARG RUNTIME_ID=linux-x64
 ARG RESOURCES_BASE_URL=https://raw.githubusercontent.com/zanfranceschi/rinha-de-backend-2026/main/resources
+ARG IVF_CLUSTERS=0
+ARG IVF_SCALE=4096
+ARG IVF_KMEANS_ITER=20
+ARG IVF_NPROBE=8
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends clang zlib1g-dev curl ca-certificates \
@@ -27,7 +31,7 @@ COPY src/Api/ src/Api/
 # Build IVF index + exact float32 oracle for reranking.
 RUN mkdir -p /data \
  && dotnet run --project src/Api/Api.csproj -c Release -- \
-        preprocess /resources/references.json.gz /data/ivf.bin 0 20 ivf 8 \
+        preprocess /resources/references.json.gz /data/ivf.bin ${IVF_CLUSTERS} ${IVF_KMEANS_ITER} ivf ${IVF_NPROBE} ${IVF_SCALE} \
  && dotnet run --project src/Api/Api.csproj -c Release -- \
         preprocess /resources/references.json.gz /data/exact.bin 0 0 exact
 

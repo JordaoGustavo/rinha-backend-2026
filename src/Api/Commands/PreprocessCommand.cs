@@ -10,7 +10,7 @@ public static class PreprocessCommand
     {
         if (args.Length < 2)
         {
-            Console.Error.WriteLine("Usage: Api preprocess <references.json.gz> <output.bin> [clusters] [kmeans_iter] [format] [nprobe]");
+            Console.Error.WriteLine("Usage: Api preprocess <references.json.gz> <output.bin> [clusters] [kmeans_iter] [format] [nprobe] [scale]");
             Console.Error.WriteLine("  format: ivf (default) or kmknn");
             return 1;
         }
@@ -48,6 +48,7 @@ public static class PreprocessCommand
         int numClusters = parsedClusters > 0 ? parsedClusters : defaultClusters;
         int kmeansIter = args.Length > 3 ? int.Parse(args[3]) : 20;
         int nprobe = args.Length > 5 ? int.Parse(args[5]) : 40;
+        int scale = args.Length > 6 ? int.Parse(args[6]) : IvfBinaryFormat.Scale;
 
         string? dir = Path.GetDirectoryName(outputPath);
         if (dir != null) Directory.CreateDirectory(dir);
@@ -71,16 +72,16 @@ public static class PreprocessCommand
         }
         else
         {
-            Console.WriteLine($"Building index: format={format}, clusters={numClusters}, iterations={kmeansIter}...");
+            Console.WriteLine($"Building index: format={format}, clusters={numClusters}, iterations={kmeansIter}, scale={scale}...");
             var ivf = IvfBuilder.Build(vectors.ToArray(), labels.ToArray(), numClusters, kmeansIter);
             Console.WriteLine($"Writing {outputPath}...");
 
             if (format == "kmknn")
                 KmknnBinaryWriter.Write(outputPath, ivf);
             else
-                IvfBinaryWriter.Write(outputPath, ivf, nprobe);
+                IvfBinaryWriter.Write(outputPath, ivf, nprobe, scale: scale);
 
-            Console.WriteLine($"Done in {sw.Elapsed.TotalSeconds:F1}s. {ivf.NumVectors} vectors, {ivf.NumClusters} clusters, format={format}, file size: {new FileInfo(outputPath).Length:N0} bytes");
+            Console.WriteLine($"Done in {sw.Elapsed.TotalSeconds:F1}s. {ivf.NumVectors} vectors, {ivf.NumClusters} clusters, scale={scale}, format={format}, file size: {new FileInfo(outputPath).Length:N0} bytes");
         }
         return 0;
     }

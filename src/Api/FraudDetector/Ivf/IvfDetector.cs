@@ -51,13 +51,18 @@ public sealed unsafe class IvfDetector : IFraudDetector
     private readonly int _adaptiveMin;
     private readonly int _adaptiveMax;
     private readonly int[] _adaptiveThresholds;
+    private readonly bool _adaptiveV2;
+    private readonly int _extremeWorstThreshold;
+    private readonly int[] _extremeClassThresholds;
+    private readonly int _scale;
 
     public int NumVectors { get; }
     public int NumClusters { get; }
     public int TotalSlots { get; }
     public int NprobeFast { get; }
     public int NprobeFull { get; }
-    public string Description => $"IVF v9 SoA-block {NumClusters} clusters, int16 centroids+vectors+radius + f32-rerank + profile-fastpath(min={_profileMinCount},enabled={_profileEnabled}), nprobe={NprobeFull}";
+    public int Scale => _scale;
+    public string Description => $"IVF v9 SoA-block {NumClusters} clusters, scale={_scale}, int16 + f32-rerank + profile-fastpath(min={_profileMinCount}), nprobe={NprobeFull}, adaptiveV2={_adaptiveV2}";
 
     /// <summary>
     /// Counter usado em testes/diagnóstico. Incrementado cada vez que
@@ -111,8 +116,19 @@ public sealed unsafe class IvfDetector : IFraudDetector
         return defaults;
     }
 
+    private static int[] ParseExtremeClassThresholds()
+    {
+        var result = new int[6];
+        for (int i = 0; i < 6; i++)
+        {
+            if (int.TryParse(Environment.GetEnvironmentVariable($"EXTREME{i}_WORST_THRESHOLD"), out var v))
+                result[i] = v;
+        }
+        return result;
+    }
+
     private IvfDetector(MemoryMappedFile mmf, MemoryMappedViewAccessor accessor, byte* basePtr,
-        int numVectors, int numClusters, int totalSlots, int nprobeFast, int nprobeFull,
+        int numVectors, int numClusters, int totalSlots, int nprobeFast, int nprobeFull, int scale,
         MemoryMappedFile? exactMmf = null, MemoryMappedViewAccessor? exactAccessor = null, float* exactVectors = null)
     {
         _mmf = mmf;
@@ -124,6 +140,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
         NumVectors = numVectors;
         NumClusters = numClusters;
         TotalSlots = totalSlots;
+        _scale = scale;
 
         int envFast = int.TryParse(Environment.GetEnvironmentVariable("NPROBE_FAST"), out var nf) ? nf : 0;
         int envFull = int.TryParse(Environment.GetEnvironmentVariable("NPROBE_FULL"), out var nF) ? nF : 0;
@@ -155,6 +172,9 @@ public sealed unsafe class IvfDetector : IFraudDetector
         _adaptiveMin = int.TryParse(Environment.GetEnvironmentVariable("ADAPTIVE_MIN"), out var amin) ? amin : 2;
         _adaptiveMax = int.TryParse(Environment.GetEnvironmentVariable("ADAPTIVE_MAX"), out var amax) ? amax : 3;
         _adaptiveThresholds = ParseAdaptiveThresholds();
+        _adaptiveV2 = Environment.GetEnvironmentVariable("ADAPTIVE_V2") == "1";
+        _extremeWorstThreshold = int.TryParse(Environment.GetEnvironmentVariable("EXTREME_WORST_THRESHOLD"), out var ewt) ? ewt : 0;
+        _extremeClassThresholds = ParseExtremeClassThresholds();
     }
 
     public static IvfDetector Open(string path)
@@ -172,9 +192,10 @@ public sealed unsafe class IvfDetector : IFraudDetector
         int numClusters = (int)*(uint*)(ptr + 12);
         int nprobeFast  = (int)*(uint*)(ptr + 24);
         int nprobeFull  = (int)*(uint*)(ptr + 28);
+        int scale       = (int)*(uint*)(ptr + 32);
         int totalSlots  = (int)*(uint*)(ptr + 36);
 
-        return new IvfDetector(mmf, accessor, ptr, numVectors, numClusters, totalSlots, nprobeFast, nprobeFull);
+        return new IvfDetector(mmf, accessor, ptr, numVectors, numClusters, totalSlots, nprobeFast, nprobeFull, scale);
     }
 
     /// <summary>
@@ -196,6 +217,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
         int numClusters = (int)*(uint*)(ptr + 12);
         int nprobeFast  = (int)*(uint*)(ptr + 24);
         int nprobeFull  = (int)*(uint*)(ptr + 28);
+        int scale       = (int)*(uint*)(ptr + 32);
         int totalSlots  = (int)*(uint*)(ptr + 36);
 
         var exactMmf = MemoryMappedFile.CreateFromFile(exactPath, FileMode.Open, null, 0, MemoryMappedFileAccess.Read);
@@ -204,7 +226,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
         exactAccessor.SafeMemoryMappedViewHandle.AcquirePointer(ref exactPtr);
         float* exactVectors = (float*)(exactPtr + ExactBinaryFormat.VectorsOffset);
 
-        return new IvfDetector(mmf, accessor, ptr, numVectors, numClusters, totalSlots, nprobeFast, nprobeFull,
+        return new IvfDetector(mmf, accessor, ptr, numVectors, numClusters, totalSlots, nprobeFast, nprobeFull, scale,
                                exactMmf, exactAccessor, exactVectors);
     }
 
@@ -258,7 +280,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
     private (bool Approved, int FraudCount) ScoreCore(ReadOnlySpan<float> query, long* ticksOut, int* countsOut)
     {
         const int pd = IvfBinaryFormat.PaddedDims;
-        const int scale = IvfBinaryFormat.Scale;
+        int scale = _scale;
         // rerankN sweep (10 k synthetic queries, seed=195842629, NPROBE_FULL=5):
         //   32 → 0.193 ms, 100% agreement (was the prior baseline)
         //    8 → 0.141 ms, 100% agreement
@@ -326,11 +348,30 @@ public sealed unsafe class IvfDetector : IFraudDetector
                     for (int i = 0; i < 5; i++)
                         p1Fraud += _labels[phase1Idx[i]];
 
-                    bool borderline = p1Fraud >= _adaptiveMin && p1Fraud <= _adaptiveMax;
-                    if (!borderline && phase1Worst <= _adaptiveThresholds[p1Fraud])
+                    if (_adaptiveV2)
                     {
-                        AdaptivePhase1Hits++;
-                        return (p1Fraud < 3, p1Fraud);
+                        int classThreshold = p1Fraud <= 5 ? _extremeClassThresholds[p1Fraud] : 0;
+                        bool shouldRerun = false;
+                        if (classThreshold > 0)
+                            shouldRerun = phase1Worst >= classThreshold;
+                        else if (p1Fraud >= _adaptiveMin && p1Fraud <= _adaptiveMax)
+                            shouldRerun = true;
+                        if (!shouldRerun && _extremeWorstThreshold > 0 && phase1Worst >= _extremeWorstThreshold)
+                            shouldRerun = true;
+                        if (!shouldRerun)
+                        {
+                            AdaptivePhase1Hits++;
+                            return (p1Fraud < 3, p1Fraud);
+                        }
+                    }
+                    else
+                    {
+                        bool borderline = p1Fraud >= _adaptiveMin && p1Fraud <= _adaptiveMax;
+                        if (!borderline && phase1Worst <= _adaptiveThresholds[p1Fraud])
+                        {
+                            AdaptivePhase1Hits++;
+                            return (p1Fraud < 3, p1Fraud);
+                        }
                     }
                 }
                 AdaptivePhase2Fallbacks++;

@@ -53,6 +53,11 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            IVF_CLUSTERS=1280
+            IVF_SCALE=10000
+            IVF_KMEANS_ITER=20
+            IVF_NPROBE=8
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
