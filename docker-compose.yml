@@ -47,6 +47,10 @@ services:
       - NPROBE_FULL=5
       - PROFILE_MIN_COUNT=15
       - UNANIMITY_SKIP=1
+      - ADAPTIVE_SEARCH=1
+      - ADAPTIVE_NPROBE_FULL=20
+      - ADAPTIVE_MIN=1
+      - ADAPTIVE_MAX=5
     volumes:
       - sock:/run/sock
     cpuset: "1"
@@ -70,6 +74,10 @@ services:
       - NPROBE_FULL=5
       - PROFILE_MIN_COUNT=15
       - UNANIMITY_SKIP=1
+      - ADAPTIVE_SEARCH=1
+      - ADAPTIVE_NPROBE_FULL=20
+      - ADAPTIVE_MIN=1
+      - ADAPTIVE_MAX=5
     volumes:
       - sock:/run/sock
     cpuset: "3"
