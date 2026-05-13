@@ -76,7 +76,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.45"
+          cpus: "0.42"
           memory: "162.5MB"
     security_opt:
       - seccomp:unconfined
