@@ -302,11 +302,11 @@ public sealed unsafe class IvfDetector : IFraudDetector
         for (int kp = 0; kp < pd / 2; kp++)
             qPairs[kp] = ((ushort)qInt[2 * kp]) | ((ushort)qInt[2 * kp + 1] << 16);
 
-        // Adaptive two-phase (inspired by luanlouzada/rinha_backend2026 C++):
-        // Phase 1: nprobe=1 fast probe. If fraud_count is outside the
-        // borderline range [_adaptiveMin, _adaptiveMax] AND worst_distance
-        // is below the per-class threshold, return immediately.
-        // Phase 2: full pipeline with higher nprobe + repair + rerank.
+        // Two-phase adaptive (inspired by luanlouzada/rinha_backend2026 C++):
+        // Phase 1: nprobe=1, k=5, no repair. Return if confident
+        // (fraud_count outside borderline range AND worst_distance below
+        // per-class threshold). Phase 2: falls through to full pipeline
+        // below (repair + rerank) — needed at scale=4096 for 0 errors.
         if (_adaptiveSearch && ticksOut == null)
         {
             Span<int> phase1Idx = stackalloc int[5];
