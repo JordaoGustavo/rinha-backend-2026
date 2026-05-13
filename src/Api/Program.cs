@@ -13,7 +13,6 @@ GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency;
 
 // Under CFS quota (0.4 CPU), extra threadpool workers compete for the same
 // timeslice causing cross-worker handoff that shows up as 1–3 ms tail.
-// removed uses 1+1; cap at 2+2 for safety margin.
 ThreadPool.SetMinThreads(1, 1);
 ThreadPool.SetMaxThreads(2, 2);
 

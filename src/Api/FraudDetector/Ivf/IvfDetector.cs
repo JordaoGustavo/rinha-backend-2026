@@ -43,6 +43,9 @@ public sealed unsafe class IvfDetector : IFraudDetector
     private readonly bool _profileEnabled;
     private readonly int _profileMinCount;
     private readonly bool _unanimitySkip;
+    private readonly bool _deterministicSkip;
+    private readonly bool _skipRerank;
+    private readonly bool _skipBboxRepair;
 
     public int NumVectors { get; }
     public int NumClusters { get; }
@@ -120,6 +123,9 @@ public sealed unsafe class IvfDetector : IFraudDetector
         _profileMinCount = int.TryParse(Environment.GetEnvironmentVariable("PROFILE_MIN_COUNT"), out var pmc) && pmc > 0
             ? pmc : 30;
         _unanimitySkip = Environment.GetEnvironmentVariable("UNANIMITY_SKIP") == "1";
+        _deterministicSkip = Environment.GetEnvironmentVariable("DETERMINISTIC_SKIP") == "1";
+        _skipRerank = Environment.GetEnvironmentVariable("SKIP_RERANK") == "1";
+        _skipBboxRepair = Environment.GetEnvironmentVariable("SKIP_BBOX_REPAIR") == "1";
     }
 
     public static IvfDetector Open(string path)
@@ -269,6 +275,9 @@ public sealed unsafe class IvfDetector : IFraudDetector
         for (int kp = 0; kp < pd / 2; kp++)
             qPairs[kp] = ((ushort)qInt[2 * kp]) | ((ushort)qInt[2 * kp + 1] << 16);
 
+        int* centroidDist = stackalloc int[NumClusters];
+        SimdDistance.Int16L2SquaredAllDimMajor(qInt, _centroidsT, centroidDist, NumClusters, pd);
+
         Span<int>   candidateIdx = stackalloc int[rerankN];
         Span<int>   topIdx       = stackalloc int[5];
         Span<float> topDist      = stackalloc float[5];
@@ -277,7 +286,8 @@ public sealed unsafe class IvfDetector : IFraudDetector
         fixed (float* qFloat = query)
         {
             int candidateCount = FindKNearest(qFloat, qInt, qPairs, rerankN, candidateIdx,
-                                              NprobeFull, useBboxRepair: true, ticksOut, countsOut);
+                                              NprobeFull,
+                                              useBboxRepair: !_skipBboxRepair, centroidDist, ticksOut, countsOut);
 
             long s2Start = ticksOut != null ? Stopwatch.GetTimestamp() : 0;
 
@@ -293,7 +303,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
             int maxPossibleFraud = Math.Min(candidateFraud, 5);
             int minPossibleFraud = Math.Max(0, candidateFraud - (candidateCount - 5));
 
-            if (maxPossibleFraud < 3 || minPossibleFraud >= 3)
+            if (_skipRerank || maxPossibleFraud < 3 || minPossibleFraud >= 3)
             {
                 RerankSkips++;
                 int topK = Math.Min(candidateCount, 5);
@@ -363,7 +373,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
     }
 
     private int FindKNearest(float* qFloat, short* qInt, int* qPairs, int k, Span<int> resultIdx,
-        int nprobe, bool useBboxRepair, long* ticksOut = null, int* countsOut = null)
+        int nprobe, bool useBboxRepair, int* centroidDist, long* ticksOut = null, int* countsOut = null, int* worstDistOut = null)
     {
         const int pd = IvfBinaryFormat.PaddedDims;
         int numClusters = NumClusters;
@@ -372,18 +382,8 @@ public sealed unsafe class IvfDetector : IFraudDetector
         int* probeList  = stackalloc int[actualNprobe];
         int* probeDists = stackalloc int[actualNprobe];
         int probeCount = 0;
-        // v8: cache the int16-squared centroid distance per cluster so the
-        // pass-2 triangle-inequality skip can reuse it without recomputing
-        // any SIMD work. 4096 clusters * 4 B = 16 KB on the call stack.
-        int* centroidDist = stackalloc int[numClusters];
 
         long t0 = ticksOut != null ? Stopwatch.GetTimestamp() : 0;
-
-        // Compute all K centroid distances in a single dim-major SIMD pass.
-        // Substitui o loop K × Int16L2Squared (horizontal reduce por
-        // cluster). Working-set por dim = K * 2 = 8 KB, cabe em L1
-        // Haswell (32 KB). Padding dims [D..pd) zeros não contribuem.
-        SimdDistance.Int16L2SquaredAllDimMajor(qInt, _centroidsT, centroidDist, numClusters, pd);
 
         // Walk K distances and build the top-actualNprobe min-heap (by
         // largest at root, so a new smaller dist can replace root).
@@ -437,16 +437,22 @@ public sealed unsafe class IvfDetector : IFraudDetector
         long t2 = ticksOut != null ? Stopwatch.GetTimestamp() : 0;
         if (ticksOut != null) ticksOut[1] = t2 - t1;
 
-        // Unanimity early exit: if all K candidates from the initial probe
-        // share the same label, skip the expensive bbox repair pass. The
-        // decision (approved/denied) cannot change regardless of what the
-        // repair pass might find. Toggle via UNANIMITY_SKIP=1.
-        if (_unanimitySkip && useBboxRepair && probeCount < numClusters && heapSize == k)
+        if (useBboxRepair && probeCount < numClusters && heapSize == k)
         {
             int fc = 0;
             for (int i = 0; i < heapSize; i++)
                 fc += _labels[heapIdx[i]];
-            if (fc == 0 || fc == heapSize)
+            if (_unanimitySkip && (fc == 0 || fc == heapSize))
+            {
+                if (ticksOut != null) ticksOut[2] = 0;
+                goto extractResults;
+            }
+            // Decision-deterministic skip: with k candidates picking top 5,
+            // if a single candidate replacement by bbox repair can't flip the
+            // decision, skip the expensive repair pass. fc<=1 → max top-5
+            // fraud after +1 change = 2 < 3 (legit). fc>=k-1 → min top-5
+            // fraud after -1 change = 3 ≥ 3 (fraud). DETERMINISTIC_SKIP=1.
+            if (_deterministicSkip && (fc <= 1 || fc >= heapSize - 1))
             {
                 if (ticksOut != null) ticksOut[2] = 0;
                 goto extractResults;
@@ -578,6 +584,8 @@ public sealed unsafe class IvfDetector : IFraudDetector
         if (ticksOut != null) ticksOut[2] = Stopwatch.GetTimestamp() - t2;
 
     extractResults:
+        if (worstDistOut != null)
+            *worstDistOut = heapSize > 0 ? heapDist[0] : int.MaxValue;
         int resultCount = heapSize;
         for (int i = heapSize - 1; i >= 0; i--)
         {

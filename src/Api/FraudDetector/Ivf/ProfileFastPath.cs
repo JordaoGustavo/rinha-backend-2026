@@ -3,12 +3,12 @@ using System.Runtime.CompilerServices;
 namespace Rinha.Api;
 
 /// <summary>
-/// Profile fast path. Extrai
-/// um hash de 22 bits de um subconjunto das 14 dims do embedding e usa um
-/// bucket precomputado pra responder queries cuja região do feature space
-/// é monocromática (todos os training points têm o mesmo label) sem rodar
-/// o IVF. Cobertura típica: ~70-90% das queries em produção do dataset
-/// rinha-2026; queries borderline (regiões mistas) caem no IVF + rerank.
+/// Profile fast path: extrai um hash de 22 bits de um subconjunto das 14
+/// dims do embedding e usa um bucket precomputado pra responder queries
+/// cuja região do feature space é monocromática (todos os training points
+/// têm o mesmo label) sem rodar o IVF. Cobertura típica: ~70-90% das
+/// queries em produção do dataset rinha-2026; queries borderline (regiões
+/// mistas) caem no IVF + rerank.
 ///
 /// Bit layout (Scale=4096, queries int16-quantizadas):
 ///   [3:0]   Bucket16(qInt[2])             — amount/avg ratio   (4 bits)
@@ -27,8 +27,7 @@ namespace Rinha.Api;
 /// </summary>
 public static class ProfileFastPath
 {
-    // 0.1 normalizado * Scale 4096 ≈ 410. Equivalente ao "vec[1] > 1000"
-    // Threshold "tem mais de uma
+    // 0.1 normalizado * Scale 4096 ≈ 410. Threshold "tem mais de uma
     // parcela ~tipica" — sinal binário simples de fraude.
     private const int InstallmentsThresholdQuantized = 410;
 

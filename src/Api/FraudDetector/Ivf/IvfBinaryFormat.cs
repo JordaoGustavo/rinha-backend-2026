@@ -18,11 +18,11 @@ public static class IvfBinaryFormat
     // distance))). Used by pass-2 triangle-inequality skip before bbox-LB.
     public const int ClusterRadiusBytes = sizeof(uint);
 
-    // v9: profile fast path data. 22-bit hash over a
-    // subset of dims (amt-ratio, kmHome, txCount, mccRisk, amt, no-last,
-    // online, cardPresent, unknownMerchant, kmCurrent, instThreshold,
-    // merchAvgAmt). Bucket monochromático com count >= threshold devolve
-    // resposta sem rodar IVF.
+    // v9: profile fast path data. 22-bit hash over a subset of dims
+    // (amt-ratio, kmHome, txCount, mccRisk, amt, no-last, online,
+    // cardPresent, unknownMerchant, kmCurrent, instThreshold, merchAvgAmt).
+    // Bucket monochromático com count >= threshold devolve resposta sem
+    // rodar IVF.
     public const int ProfileBits = 22;
     public const int ProfileKeyCount = 1 << ProfileBits;     // 4 194 304
     public const long ProfileMaskBytes = ProfileKeyCount * sizeof(byte);    // 4 MB

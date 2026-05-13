@@ -44,6 +44,7 @@ services:
       - NPROBE_FULL=5
       - PROFILE_MIN_COUNT=15
       - UNANIMITY_SKIP=1
+      - DETERMINISTIC_SKIP=1
       - SERVER_TIMING=${SERVER_TIMING:-0}
     volumes:
       - sock:/run/sock
@@ -67,6 +68,7 @@ services:
       - NPROBE_FULL=5
       - PROFILE_MIN_COUNT=15
       - UNANIMITY_SKIP=1
+      - DETERMINISTIC_SKIP=1
       - SERVER_TIMING=${SERVER_TIMING:-0}
     volumes:
       - sock:/run/sock
