@@ -12,11 +12,6 @@ endif
 COMPOSE := docker compose -f docker/docker-compose.yml --project-directory docker
 IMAGE   := rinha/api:latest
 
-IVF_CLUSTERS ?= 0
-IVF_SCALE    ?= 4096
-IVF_KMEANS   ?= 20
-IVF_NPROBE   ?= 8
-
 download-resources:
 	./scripts/download-resources.sh
 
@@ -26,12 +21,10 @@ download-k6-official:
 preprocess: download-resources
 	mkdir -p data
 	dotnet run --project src/Api/Api.csproj -c Release -- \
-		preprocess $(CURDIR)/resources/references.json.gz $(CURDIR)/data/ivf.bin $(IVF_CLUSTERS) $(IVF_KMEANS) ivf $(IVF_NPROBE) $(IVF_SCALE)
+		preprocess $(CURDIR)/resources/references.json.gz $(CURDIR)/data/ivf.bin 0 20 ivf 8
 
 docker-build:
 	docker build $(PLATFORM_FLAG) --build-arg RUNTIME_ID=$(RUNTIME_ID) \
-		--build-arg IVF_CLUSTERS=$(IVF_CLUSTERS) --build-arg IVF_SCALE=$(IVF_SCALE) \
-		--build-arg IVF_KMEANS_ITER=$(IVF_KMEANS) --build-arg IVF_NPROBE=$(IVF_NPROBE) \
 		-f docker/Dockerfile -t $(IMAGE) .
 
 docker-build-dev:

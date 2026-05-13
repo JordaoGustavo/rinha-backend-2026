@@ -2,12 +2,13 @@ namespace Rinha.Api;
 
 public static class IvfBinaryWriter
 {
-    public static void Write(string path, IvfResult ivf, int nprobeFull = 40, int nprobeFast = 5, int scale = IvfBinaryFormat.Scale)
+    public static void Write(string path, IvfResult ivf, int nprobeFull = 40, int nprobeFast = 5)
     {
         int k = ivf.NumClusters;
         int n = ivf.NumVectors;
         const int pd = IvfBinaryFormat.PaddedDims;
         const int bv = IvfBinaryFormat.BlockVectors;
+        const int scale = IvfBinaryFormat.Scale;
 
         var paddedOffsets = new int[k];
         var counts = new int[k];
