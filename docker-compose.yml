@@ -3,7 +3,7 @@
 # replicas; bridge network; port 9999; no business logic on the LB.
 #
 # CPU split: LB 0.10 + API 0.45 × 2 = 1.00. so-no-forevis at TCP splice
-# uses ~0.027 CPU at 900 req/s. 0.10 has 3.7x headroom.
+# uses ~0.027 CPU at 900 req/s. 0.10 gives 3.7x headroom.
 
 services:
   lb:
@@ -26,7 +26,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.16"
+          cpus: "0.10"
           memory: "25MB"
     ulimits:
       nofile:
@@ -47,6 +47,7 @@ services:
       - NPROBE_FULL=5
       - PROFILE_MIN_COUNT=15
       - UNANIMITY_SKIP=1
+      - DETERMINISTIC_SKIP=1
       - ADAPTIVE_SEARCH=1
       - ADAPTIVE_NPROBE_FULL=20
       - ADAPTIVE_MIN=1
@@ -57,7 +58,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.42"
+          cpus: "0.45"
           memory: "162.5MB"
     security_opt:
       - seccomp:unconfined
@@ -74,6 +75,7 @@ services:
       - NPROBE_FULL=5
       - PROFILE_MIN_COUNT=15
       - UNANIMITY_SKIP=1
+      - DETERMINISTIC_SKIP=1
       - ADAPTIVE_SEARCH=1
       - ADAPTIVE_NPROBE_FULL=20
       - ADAPTIVE_MIN=1
@@ -84,7 +86,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.42"
+          cpus: "0.45"
           memory: "162.5MB"
     security_opt:
       - seccomp:unconfined
