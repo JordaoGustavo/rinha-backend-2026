@@ -110,6 +110,14 @@ public static class AccuracyCommand
             Console.WriteLine($"  → misses (IVF ran):    {fpMiss} ({100.0 * fpMiss / fpTotal:F2}%)");
             if (fpMiss > 0)
                 Console.WriteLine($"  → rerank skips:        {rerankSkips} / {fpMiss} ({100.0 * rerankSkips / fpMiss:F2}%)");
+            long a1 = IvfDetector.AdaptivePhase1Hits;
+            long a2 = IvfDetector.AdaptivePhase2Fallbacks;
+            if (a1 + a2 > 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine($"adaptive phase-1 hits:   {a1} / {a1 + a2} ({100.0 * a1 / (a1 + a2):F2}%)");
+                Console.WriteLine($"adaptive phase-2 falls:  {a2} / {a1 + a2} ({100.0 * a2 / (a1 + a2):F2}%)");
+            }
         }
         Console.WriteLine();
         if (firstFailures.Count > 0)

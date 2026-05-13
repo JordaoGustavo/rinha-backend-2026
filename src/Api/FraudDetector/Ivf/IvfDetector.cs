@@ -43,6 +43,13 @@ public sealed unsafe class IvfDetector : IFraudDetector
     private readonly bool _profileEnabled;
     private readonly int _profileMinCount;
     private readonly bool _unanimitySkip;
+    private readonly bool _skipRerank;
+    private readonly bool _skipBboxRepair;
+    private readonly bool _adaptiveSearch;
+    private readonly int _adaptiveNprobeFull;
+    private readonly int _adaptiveMin;
+    private readonly int _adaptiveMax;
+    private readonly int[] _adaptiveThresholds;
 
     public int NumVectors { get; }
     public int NumClusters { get; }
@@ -68,6 +75,8 @@ public sealed unsafe class IvfDetector : IFraudDetector
     public static long ProfileFastPathFraudHits;
     public static long ProfileFastPathMisses;
     public static long RerankSkips;
+    public static long AdaptivePhase1Hits;
+    public static long AdaptivePhase2Fallbacks;
 
     /// <summary>
     /// Quantos dim-pairs a pass de early-exit do ScanClusterAvx2 acumula
@@ -83,6 +92,22 @@ public sealed unsafe class IvfDetector : IFraudDetector
             && v >= 1 && v <= 8)
             return v;
         return 4;
+    }
+
+    // Per-class worst_distance thresholds for adaptive phase-1 confidence.
+    // ADAPTIVE_THRESHOLDS="t0,t1,t2,t3,t4,t5" — fraud_count in
+    // [ADAPTIVE_MIN, ADAPTIVE_MAX] always falls through to phase 2.
+    // Defaults scaled from luanlouzada/rinha_backend2026 C++ solution
+    // (scale=10000) to our scale=4096: factor = (4096/10000)^2 ≈ 0.1678.
+    private static int[] ParseAdaptiveThresholds()
+    {
+        var defaults = new int[] { 587500, 599000, 0, 0, 553000, 771000 };
+        var env = Environment.GetEnvironmentVariable("ADAPTIVE_THRESHOLDS");
+        if (string.IsNullOrEmpty(env)) return defaults;
+        var parts = env.Split(',');
+        for (int i = 0; i < Math.Min(parts.Length, 6); i++)
+            if (int.TryParse(parts[i], out var v)) defaults[i] = v;
+        return defaults;
     }
 
     private IvfDetector(MemoryMappedFile mmf, MemoryMappedViewAccessor accessor, byte* basePtr,
@@ -120,6 +145,14 @@ public sealed unsafe class IvfDetector : IFraudDetector
         _profileMinCount = int.TryParse(Environment.GetEnvironmentVariable("PROFILE_MIN_COUNT"), out var pmc) && pmc > 0
             ? pmc : 30;
         _unanimitySkip = Environment.GetEnvironmentVariable("UNANIMITY_SKIP") == "1";
+        _skipRerank = Environment.GetEnvironmentVariable("SKIP_RERANK") == "1";
+        _skipBboxRepair = Environment.GetEnvironmentVariable("SKIP_BBOX_REPAIR") == "1";
+        _adaptiveSearch = Environment.GetEnvironmentVariable("ADAPTIVE_SEARCH") == "1";
+        _adaptiveNprobeFull = int.TryParse(Environment.GetEnvironmentVariable("ADAPTIVE_NPROBE_FULL"), out var anf) && anf > 0
+            ? anf : NprobeFull;
+        _adaptiveMin = int.TryParse(Environment.GetEnvironmentVariable("ADAPTIVE_MIN"), out var amin) ? amin : 2;
+        _adaptiveMax = int.TryParse(Environment.GetEnvironmentVariable("ADAPTIVE_MAX"), out var amax) ? amax : 3;
+        _adaptiveThresholds = ParseAdaptiveThresholds();
     }
 
     public static IvfDetector Open(string path)
@@ -269,6 +302,36 @@ public sealed unsafe class IvfDetector : IFraudDetector
         for (int kp = 0; kp < pd / 2; kp++)
             qPairs[kp] = ((ushort)qInt[2 * kp]) | ((ushort)qInt[2 * kp + 1] << 16);
 
+        // Adaptive two-phase (inspired by luanlouzada/rinha_backend2026 C++):
+        // Phase 1: nprobe=1 fast probe. If fraud_count is outside the
+        // borderline range [_adaptiveMin, _adaptiveMax] AND worst_distance
+        // is below the per-class threshold, return immediately.
+        // Phase 2: full pipeline with higher nprobe + repair + rerank.
+        if (_adaptiveSearch && ticksOut == null)
+        {
+            Span<int> phase1Idx = stackalloc int[5];
+            int phase1Worst;
+            fixed (float* qf = query)
+            {
+                int p1Count = FindKNearest(qf, qInt, qPairs, 5, phase1Idx,
+                    nprobe: 1, useBboxRepair: false, ticksOut: null, countsOut: null, worstDistOut: &phase1Worst);
+                if (p1Count == 5)
+                {
+                    int p1Fraud = 0;
+                    for (int i = 0; i < 5; i++)
+                        p1Fraud += _labels[phase1Idx[i]];
+
+                    bool borderline = p1Fraud >= _adaptiveMin && p1Fraud <= _adaptiveMax;
+                    if (!borderline && phase1Worst <= _adaptiveThresholds[p1Fraud])
+                    {
+                        AdaptivePhase1Hits++;
+                        return (p1Fraud < 3, p1Fraud);
+                    }
+                }
+                AdaptivePhase2Fallbacks++;
+            }
+        }
+
         Span<int>   candidateIdx = stackalloc int[rerankN];
         Span<int>   topIdx       = stackalloc int[5];
         Span<float> topDist      = stackalloc float[5];
@@ -277,7 +340,8 @@ public sealed unsafe class IvfDetector : IFraudDetector
         fixed (float* qFloat = query)
         {
             int candidateCount = FindKNearest(qFloat, qInt, qPairs, rerankN, candidateIdx,
-                                              NprobeFull, useBboxRepair: true, ticksOut, countsOut);
+                                              _adaptiveSearch ? _adaptiveNprobeFull : NprobeFull,
+                                              useBboxRepair: !_skipBboxRepair, ticksOut, countsOut);
 
             long s2Start = ticksOut != null ? Stopwatch.GetTimestamp() : 0;
 
@@ -293,7 +357,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
             int maxPossibleFraud = Math.Min(candidateFraud, 5);
             int minPossibleFraud = Math.Max(0, candidateFraud - (candidateCount - 5));
 
-            if (maxPossibleFraud < 3 || minPossibleFraud >= 3)
+            if (_skipRerank || maxPossibleFraud < 3 || minPossibleFraud >= 3)
             {
                 RerankSkips++;
                 int topK = Math.Min(candidateCount, 5);
@@ -363,7 +427,7 @@ public sealed unsafe class IvfDetector : IFraudDetector
     }
 
     private int FindKNearest(float* qFloat, short* qInt, int* qPairs, int k, Span<int> resultIdx,
-        int nprobe, bool useBboxRepair, long* ticksOut = null, int* countsOut = null)
+        int nprobe, bool useBboxRepair, long* ticksOut = null, int* countsOut = null, int* worstDistOut = null)
     {
         const int pd = IvfBinaryFormat.PaddedDims;
         int numClusters = NumClusters;
@@ -578,6 +642,8 @@ public sealed unsafe class IvfDetector : IFraudDetector
         if (ticksOut != null) ticksOut[2] = Stopwatch.GetTimestamp() - t2;
 
     extractResults:
+        if (worstDistOut != null)
+            *worstDistOut = heapSize > 0 ? heapDist[0] : int.MaxValue;
         int resultCount = heapSize;
         for (int i = heapSize - 1; i >= 0; i--)
         {
